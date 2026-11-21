@@ -9,14 +9,20 @@
 - **Low-battery alerts** so nothing dies mid-game or mid-call.
 - Starts with Windows. Small native C++ app, no ads, no subscription.
 
+**Reads:** any Bluetooth device that shows a battery in Windows Settings (headphones, earbuds, mice, keyboards,
+controllers), AirPods and Beats (left, right and case), Logitech mice and keyboards on Unifying / Bolt / Lightspeed
+receivers (new in 1.1), SteelSeries Arctis Nova 5 / 5P / 5X, Attack Shark / Ajazz / ATK / VXE 2.4 GHz receivers,
+Xbox (Bluetooth) and GameSir controllers. Not yet: Razer, Corsair, HyperX receivers.
+
 Tested with Sony WH-1000XM5 headphones and an Attack Shark X1 mouse.
 
 ## Install
-1. Download `Juice-1.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
+1. Download `Juice-1.1.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
 2. Run `Juice.exe`. If SmartScreen warns, click **More info > Run anyway** (the exe is unsigned).
 
-## Source
-This repo currently holds the release and the app icon (`assets/juice.ico`). The source code will be added later.
+## Build
+C++17, cross-compiled with MinGW-w64 on Linux: `sudo apt-get install g++-mingw-w64-x86-64`, then `./build.sh` -> `out/Juice.exe`.
+`src/` has the app (tray icons, widget, pollers per device family), `res/` the icon, manifest and version.
 
 ## License
 MIT
