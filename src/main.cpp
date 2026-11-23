@@ -47,7 +47,9 @@ enum : UINT {
     IDM_EXIT,
     IDM_STYLE_SYMBOL,
     IDM_STYLE_NUMBER,
+    IDM_NAMES,
     IDM_ALERT_OFF = 200,  // 200 + percent
+    IDM_DEVICE = 1000,    // 1000 + 3 x device: hide / show, rename, original name
 };
 const UINT kPlaceholderIcon = 1;
 
@@ -64,6 +66,7 @@ struct Settings {
     int wx = INT_MIN, wy = INT_MIN;
     bool autostart = true;
     int iconStyle = 0;  // 0 = device symbol + ring, 1 = number
+    bool showNames = false;  // device names in the widget
     void Load() {
         // Hand-edited or damaged values fall back to the default instead of changing behaviour.
         wchar_t raw[32] = {};
@@ -78,6 +81,7 @@ struct Settings {
         wx = GetInt(L"WidgetX", INT_MIN);
         wy = GetInt(L"WidgetY", INT_MIN);
         autostart = GetInt(L"Autostart", 1) != 0;
+        showNames = GetInt(L"WidgetNames", 0) != 0;
         iconStyle = GetInt(L"IconStyle", 0) == 1 ? 1 : 0;
     }
 } g_set;
@@ -109,6 +113,73 @@ ULONGLONG g_resumeAt = 0;   // AwakeMs() of the last wake from sleep
 
 // ---- helpers ------------------------------------------------------------------------------------
 
+// Saved per device in settings.ini: [Names] key=custom name, [Hidden] key=name shown in the menu.
+// INI files here are ANSI, so anything else (Arabic names, for example) is stored as \uXXXX.
+std::map<std::wstring, std::wstring> g_names, g_hidden;
+
+std::wstring EscapeIni(const std::wstring& s) {
+    std::wstring o;
+    for (wchar_t c : s) {
+        if (c >= 0x20 && c < 0x7F && c != L'\\' && c != L'"' && c != L'\'' && c != L';') o += c;
+        else o += Fmt(L"\\u%04X", (unsigned)c);
+    }
+    return o;
+}
+
+std::wstring UnescapeIni(const std::wstring& s) {
+    std::wstring o;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == L'\\' && i + 5 < s.size() && s[i + 1] == L'u') {
+            wchar_t hex[5] = { s[i + 2], s[i + 3], s[i + 4], s[i + 5], 0 };
+            wchar_t* end = nullptr;
+            unsigned long v = wcstoul(hex, &end, 16);
+            if (end == hex + 4) {
+                o += (wchar_t)v;
+                i += 5;
+                continue;
+            }
+        }
+        o += s[i];
+    }
+    return o;
+}
+
+std::map<std::wstring, std::wstring> LoadSection(const wchar_t* section) {
+    std::map<std::wstring, std::wstring> out;
+    std::vector<wchar_t> buf(32767);
+    DWORD n = GetPrivateProfileSectionW(section, buf.data(), (DWORD)buf.size(), IniPath().c_str());
+    for (DWORD i = 0; i < n && buf[i];) {
+        std::wstring line = buf.data() + i;
+        i += (DWORD)line.size() + 1;
+        size_t eq = line.find(L'=');
+        if (eq != std::wstring::npos && eq > 0) out[line.substr(0, eq)] = UnescapeIni(line.substr(eq + 1));
+    }
+    return out;
+}
+
+void SaveEntry(const wchar_t* section, const std::wstring& key, const std::wstring* value) {
+    WritePrivateProfileStringW(section, key.c_str(), value ? EscapeIni(*value).c_str() : nullptr, IniPath().c_str());
+}
+
+std::wstring DisplayName(const Entry& e) {
+    auto it = g_names.find(e.r.key);
+    return it != g_names.end() ? it->second : e.r.name;
+}
+
+bool IsHidden(const std::wstring& key) { return g_hidden.count(key) != 0; }
+
+const wchar_t* GenericName(Kind k) {
+    switch (k) {
+        case Kind::Mouse: return L"Wireless mouse";
+        case Kind::Keyboard: return L"Wireless keyboard";
+        case Kind::Gamepad: return L"Controller";
+        case Kind::Earbuds: return L"Earbuds";
+        case Kind::Headphones: return L"Headphones";
+        case Kind::Headset: return L"Headset";
+        default: return L"Wireless device";
+    }
+}
+
 UINT IconIdFor(const std::wstring& key) {
     // Stable across runs, so Windows remembers per icon whether it is shown on the taskbar.
     UINT h = 2166136261u;
@@ -133,10 +204,11 @@ int KindOrder(Kind k) {
 
 std::vector<Entry*> Ordered() {
     std::vector<Entry*> v;
-    for (auto& [k, e] : g_devs) v.push_back(&e);
+    for (auto& [k, e] : g_devs)
+        if (!IsHidden(k)) v.push_back(&e);
     std::sort(v.begin(), v.end(), [](Entry* a, Entry* b) {
         if (KindOrder(a->r.kind) != KindOrder(b->r.kind)) return KindOrder(a->r.kind) < KindOrder(b->r.kind);
-        return a->r.name < b->r.name;
+        return DisplayName(*a) < DisplayName(*b);
     });
     return v;
 }
@@ -184,7 +256,7 @@ int TrayIconSize() {
 // ---- tray icons -----------------------------------------------------------------------------------
 
 std::wstring TipFor(const Entry& e) {
-    std::wstring t = e.r.name + L"\n";
+    std::wstring t = DisplayName(e) + L"\n";
     if (e.r.buds) {
         t += L"L " + PctText(e.r.left) + (e.r.leftChg ? L"\x26A1" : L"") + L"   R " + PctText(e.r.right) + (e.r.rightChg ? L"\x26A1" : L"") +
              L"   Case " + PctText(e.r.box) + (e.r.boxChg ? L"\x26A1" : L"");
@@ -241,6 +313,11 @@ void DeleteIcon(UINT id) {
 void RefreshIcons(bool force) {
     bool light = LightTaskbar();
     int size = TrayIconSize();
+    for (auto& [k, e] : g_devs)
+        if (e.iconAdded && IsHidden(k)) {
+            DeleteIcon(e.iconId);
+            e.iconAdded = false;
+        }
     auto list = Ordered();
     bool anyAdded = false;
     for (Entry* e : list) {
@@ -275,7 +352,7 @@ void RefreshIcons(bool force) {
     if (wantPlaceholder && (!g_placeholder || force)) {
         if (g_placeholderIcon) DestroyIcon(g_placeholderIcon);
         g_placeholderIcon = MakeNumberIcon(L"\x2013", ToneColor(Tone::Stale, light), size);
-        g_placeholder = AddIcon(kPlaceholderIcon, g_placeholderIcon, L"Juice\nLooking for your devices...");
+        g_placeholder = AddIcon(kPlaceholderIcon, g_placeholderIcon, g_devs.empty() ? L"Juice\nLooking for your devices..." : L"Juice\nAll devices are hidden");
         anyAdded |= g_placeholder;
     } else if (!wantPlaceholder && g_placeholder) {
         DeleteIcon(kPlaceholderIcon);
@@ -339,7 +416,7 @@ bool ShowAlert(Entry& e) {
     FillNid(nid, e.iconId);
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_WARNING | NIIF_LARGE_ICON;
-    std::wstring title = e.r.name + L" is low";
+    std::wstring title = DisplayName(e) + L" is low";
     std::wstring body = e.r.buds ? (L"L " + PctText(e.r.left) + L"  R " + PctText(e.r.right) + L"  Case " + PctText(e.r.box))
                                  : (PctText(e.r.percent) + L" left. Time to charge.");
     wcsncpy(nid.szInfoTitle, title.c_str(), 63);
@@ -358,7 +435,7 @@ void CheckAlerts() {
             e.alertPending = false;
             continue;
         }
-        if (e.stale || e.r.noAlert || pct < 0 || pct > g_set.alertAt || g_alerted.count(k) || !e.iconAdded) continue;
+        if (IsHidden(k) || e.stale || e.r.noAlert || pct < 0 || pct > g_set.alertAt || g_alerted.count(k) || !e.iconAdded) continue;
         if (UserBusy()) {
             e.alertPending = true;  // gaming / full screen / locked: tell later
             continue;
@@ -505,7 +582,7 @@ SIZE WidgetSize(int dpi) {
     auto list = Ordered();
     if (list.empty()) h += Sc(42, dpi);
     for (Entry* e : list) h += RowHeight(*e, dpi);
-    return { Sc(224, dpi), h };
+    return { Sc(g_set.showNames ? 272 : 224, dpi), h };
 }
 
 void FillPill(HDC dc, const RECT& r, COLORREF c) {
@@ -543,7 +620,7 @@ void PaintWidget(HWND hwnd, HDC target) {
         SelectObject(dc, g_wf.name);
         SetTextColor(dc, RGB(0xA0, 0xA0, 0xA0));
         RECT t{ pad, y, rc.right - pad, y + Sc(42, dpi) };
-        DrawTextW(dc, L"Looking for your devices...", -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(dc, g_devs.empty() ? L"Looking for your devices..." : L"All devices are hidden", -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     for (Entry* e : list) {
         const int topH = Sc(42, dpi);
@@ -572,7 +649,14 @@ void PaintWidget(HWND hwnd, HDC target) {
         }
 
         // Level bar
-        int barH = Sc(5, dpi), barY = y + (topH - barH) / 2;
+        int barH = Sc(5, dpi), barY = g_set.showNames ? y + Sc(28, dpi) : y + (topH - barH) / 2;
+        if (g_set.showNames) {
+            std::wstring label = DisplayName(*e);
+            SelectObject(dc, g_wf.name);
+            SetTextColor(dc, e->stale ? RGB(0x90, 0x90, 0x90) : RGB(0xF0, 0xF0, 0xF0));
+            RECT n{ x0, y + Sc(5, dpi), barRight, y + Sc(25, dpi) };
+            DrawTextW(dc, label.c_str(), -1, &n, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
         RECT track{ x0, barY, barRight, barY + barH };
         FillPill(dc, track, RGB(0x3A, 0x3A, 0x3A));
         if (e->r.percent > 0) {
@@ -661,6 +745,189 @@ void ShowWidget(bool show) {
     }
 }
 
+// ---- rename box -----------------------------------------------------------------------------------
+
+struct RenameBox {
+    HWND edit = nullptr;
+    bool done = false, accepted = false;
+    std::wstring text;
+    HBRUSH bg = nullptr, field = nullptr;
+};
+
+LRESULT CALLBACK RenameProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* box = (RenameBox*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+        case WM_COMMAND:
+            if (box && (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL)) {
+                box->accepted = LOWORD(wp) == IDOK;
+                if (box->accepted) {
+                    wchar_t buf[64] = {};
+                    GetWindowTextW(box->edit, buf, 64);
+                    box->text = buf;
+                }
+                box->done = true;
+            }
+            return 0;
+        case WM_CLOSE:
+            if (box) box->done = true;
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            SetTextColor((HDC)wp, RGB(0xF2, 0xF2, 0xF2));
+            SetBkColor((HDC)wp, RGB(0x20, 0x20, 0x20));
+            return box ? (LRESULT)box->bg : 0;
+        case WM_CTLCOLOREDIT:
+            SetTextColor((HDC)wp, RGB(0xF2, 0xF2, 0xF2));
+            SetBkColor((HDC)wp, RGB(0x2D, 0x2D, 0x2D));
+            return box ? (LRESULT)box->field : 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// Returns true when the user pressed OK. An empty result means "use the original name".
+bool AskName(const std::wstring& current, std::wstring& result) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{ sizeof(wc) };
+        wc.lpfnWndProc = RenameProc;
+        wc.hInstance = g_inst;
+        wc.lpszClassName = L"JuiceRename";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = CreateSolidBrush(RGB(0x20, 0x20, 0x20));
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    POINT pt;
+    GetCursorPos(&pt);
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    GetMonitorInfoW(mon, &mi);
+    UINT dpiX = 96, dpiY = 96;
+    using DpiFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+    if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
+        if (auto fn = (DpiFn)GetProcAddress(shcore, "GetDpiForMonitor")) fn(mon, 0, &dpiX, &dpiY);
+        FreeLibrary(shcore);
+    }
+    int dpi = (int)dpiX;
+    RECT rc{ 0, 0, Sc(320, dpi), Sc(132, dpi) };
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    AdjustWindowRectExForDpi(&rc, style, FALSE, WS_EX_TOPMOST, dpi);
+    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    int x = (mi.rcWork.left + mi.rcWork.right - w) / 2, y = (mi.rcWork.top + mi.rcWork.bottom - h) / 2;
+    HWND wnd = CreateWindowExW(WS_EX_TOPMOST, L"JuiceRename", L"Rename device", style, x, y, w, h, nullptr, nullptr, g_inst, nullptr);
+    if (!wnd) return false;
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    RenameBox box;
+    box.bg = CreateSolidBrush(RGB(0x20, 0x20, 0x20));
+    box.field = CreateSolidBrush(RGB(0x2D, 0x2D, 0x2D));
+    SetWindowLongPtrW(wnd, GWLP_USERDATA, (LONG_PTR)&box);
+    HFONT font = CreateFontW(-Sc(14, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    auto child = [&](const wchar_t* cls, const wchar_t* text, DWORD st, DWORD ex, int cx, int cy, int cw, int ch, UINT_PTR id) {
+        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | st, Sc(cx, dpi), Sc(cy, dpi), Sc(cw, dpi), Sc(ch, dpi), wnd, (HMENU)id, g_inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)font, TRUE);
+        return c;
+    };
+    child(L"STATIC", L"Name (leave empty for the original)", SS_NOPREFIX, 0, 14, 12, 292, 22, 0);
+    box.edit = child(L"EDIT", current.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 0, 14, 38, 292, 28, 100);
+    SendMessageW(box.edit, EM_SETLIMITTEXT, 32, 0);
+    child(L"BUTTON", L"Save", WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 126, 86, 86, 30, IDOK);
+    child(L"BUTTON", L"Cancel", WS_TABSTOP, 0, 220, 86, 86, 30, IDCANCEL);
+    ShowWindow(wnd, SW_SHOW);
+    SetForegroundWindow(wnd);
+    SetFocus(box.edit);
+    SendMessageW(box.edit, EM_SETSEL, 0, -1);
+    MSG m;
+    while (!box.done) {
+        BOOL got = GetMessageW(&m, nullptr, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage((int)m.wParam);  // Juice is closing: let the main loop see it
+            box.done = true;
+            box.accepted = false;
+            break;
+        }
+        if (!IsDialogMessageW(wnd, &m)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    }
+    SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
+    DestroyWindow(wnd);
+    DeleteObject(font);
+    DeleteObject(box.bg);
+    DeleteObject(box.field);
+    if (box.accepted) result = box.text;
+    return box.accepted;
+}
+
+// Every device Juice knows, including hidden ones that are switched off right now.
+struct KnownDevice {
+    std::wstring key, label;
+    bool hidden, present;
+};
+
+std::vector<KnownDevice> KnownDevices() {
+    std::vector<KnownDevice> v;
+    for (auto& [k, e] : g_devs) v.push_back({ k, DisplayName(e), IsHidden(k), true });
+    for (auto& [k, label] : g_hidden)
+        if (!g_devs.count(k)) {
+            auto n = g_names.find(k);
+            v.push_back({ k, n != g_names.end() ? n->second : label, true, false });
+        }
+    std::sort(v.begin(), v.end(), [](const KnownDevice& a, const KnownDevice& b) { return a.label < b.label; });
+    return v;
+}
+
+std::wstring MenuText(std::wstring s) {
+    for (size_t p = 0; (p = s.find(L'&', p)) != std::wstring::npos; p += 2) s.insert(p, 1, L'&');
+    return s;
+}
+
+void DevicesChanged() {
+    RefreshIcons(false);
+    if (g_widget) {
+        if (IsWindowVisible(g_widget)) PlaceWidget(false);
+        InvalidateRect(g_widget, nullptr, FALSE);
+    }
+}
+
+void HandleDeviceCommand(const KnownDevice& d, int action) {
+    if (action == 0) {  // hide / show
+        if (d.hidden) {
+            g_hidden.erase(d.key);
+            SaveEntry(L"Hidden", d.key, nullptr);
+        } else {
+            g_hidden[d.key] = d.label;
+            SaveEntry(L"Hidden", d.key, &d.label);
+        }
+    } else if (action == 1) {  // rename
+        std::wstring name;
+        if (!AskName(d.label, name)) return;
+        while (!name.empty() && name.back() == L' ') name.pop_back();
+        while (!name.empty() && name.front() == L' ') name.erase(0, 1);
+        auto dev = g_devs.find(d.key);
+        if (name.empty() || (dev != g_devs.end() && name == dev->second.r.name)) {
+            g_names.erase(d.key);
+            SaveEntry(L"Names", d.key, nullptr);
+        } else {
+            g_names[d.key] = name;
+            SaveEntry(L"Names", d.key, &name);
+        }
+        if (IsHidden(d.key)) {  // keep the menu label right while it is hidden
+            std::wstring label = name.empty() && dev != g_devs.end() ? dev->second.r.name : name;
+            if (!label.empty()) {
+                g_hidden[d.key] = label;
+                SaveEntry(L"Hidden", d.key, &label);
+            }
+        }
+    } else {  // original name
+        g_names.erase(d.key);
+        SaveEntry(L"Names", d.key, nullptr);
+    }
+    DevicesChanged();
+}
+
 // ---- menu -----------------------------------------------------------------------------------------
 
 void ShowMenu(HWND owner) {
@@ -674,6 +941,21 @@ void ShowMenu(HWND owner) {
     AppendMenuW(style, MF_STRING | (g_set.iconStyle == 1 ? MF_CHECKED : 0), IDM_STYLE_NUMBER, L"Number");
     AppendMenuW(m, MF_STRING | (g_set.widget ? MF_CHECKED : 0), IDM_WIDGET, L"Show widget");
     AppendMenuW(m, MF_STRING | (g_set.onTop ? MF_CHECKED : 0), IDM_ONTOP, L"Keep widget on top");
+    AppendMenuW(m, MF_STRING | (g_set.showNames ? MF_CHECKED : 0), IDM_NAMES, L"Show device names");
+    auto known = KnownDevices();
+    HMENU devices = CreatePopupMenu();
+    for (size_t i = 0; i < known.size(); i++) {
+        const KnownDevice& d = known[i];
+        HMENU sub = CreatePopupMenu();
+        UINT base = IDM_DEVICE + (UINT)i * 3;
+        AppendMenuW(sub, MF_STRING | (d.hidden ? MF_CHECKED : 0), base, L"Hidden");
+        AppendMenuW(sub, MF_STRING, base + 1, L"Rename...");
+        AppendMenuW(sub, MF_STRING | (g_names.count(d.key) ? 0 : MF_GRAYED), base + 2, L"Use original name");
+        std::wstring label = MenuText(d.label) + (d.hidden ? L"  (hidden)" : L"");
+        AppendMenuW(devices, MF_POPUP, (UINT_PTR)sub, label.c_str());
+    }
+    if (known.empty()) AppendMenuW(devices, MF_STRING | MF_GRAYED, 0, L"No devices yet");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)devices, L"Devices");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, L"Taskbar icons");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)alert, L"Low-battery alert");
     AppendMenuW(m, MF_STRING | (AutostartActive() ? MF_CHECKED : 0), IDM_AUTOSTART, L"Start with Windows");
@@ -697,6 +979,12 @@ void ShowMenu(HWND owner) {
         g_set.onTop = !g_set.onTop;
         SetInt(L"WidgetOnTop", g_set.onTop);
         PlaceWidget(false, true);
+    } else if (cmd == IDM_NAMES) {
+        g_set.showNames = !g_set.showNames;
+        SetInt(L"WidgetNames", g_set.showNames);
+        DevicesChanged();
+    } else if (cmd >= IDM_DEVICE && (cmd - IDM_DEVICE) / 3 < known.size()) {
+        HandleDeviceCommand(known[(cmd - IDM_DEVICE) / 3], (int)((cmd - IDM_DEVICE) % 3));
     } else if (cmd == IDM_AUTOSTART) {
         bool on = !AutostartActive();
         g_set.autostart = on;
@@ -732,12 +1020,14 @@ void ApplyReadings(std::vector<Reading>& readings) {
         Entry& e = g_devs[r.key];
         int oldPct = e.r.percent;
         bool isNew = e.lastSeen == 0;
+        std::wstring oldName = e.r.name;
         e.r = r;
+        if (e.r.name.empty()) e.r.name = !oldName.empty() ? oldName : GenericName(e.r.kind);  // junk name from a sleeping device
         if (e.r.percent < 0 && oldPct >= 0) e.r.percent = oldPct;  // e.g. charging without a level: keep the last one
         e.stale = r.asleep;
         if (!r.asleep) e.lastSeen = now;
         else if (isNew) e.lastSeen = now;
-        if (isNew) Log(L"found %ls (%ls): %d%%", r.name.c_str(), r.via.c_str(), r.percent);
+        if (isNew) Log(L"found %ls (%ls): %d%%", e.r.name.c_str(), r.via.c_str(), r.percent);
     }
     for (auto it = g_devs.begin(); it != g_devs.end();) {
         Entry& e = it->second;
@@ -967,6 +1257,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     IconsInit();
     g_firstRun = GetInt(L"FirstRunDone", 0) == 0;
     g_set.Load();
+    g_names = LoadSection(L"Names");
+    g_hidden = LoadSection(L"Hidden");
     if (g_firstRun) SetInt(L"FirstRunDone", 1);
     if (g_set.autostart && (g_firstRun || AutostartActive())) SetAutostart(true);  // keeps the path current if the app moved
     Log(L"Juice started%ls (data in %ls)", restarted ? L" after a restart" : L"", DataDir().c_str());

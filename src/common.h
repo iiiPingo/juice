@@ -42,6 +42,8 @@ struct Reading {
     int graceSec = 120;  // how long the last value stays on screen after the device goes quiet
     std::wstring btContainer;  // set on Windows' generic Bluetooth readings
     std::vector<std::wstring> sameAs;  // Bluetooth containers this dedicated reading replaces
+    bool gamesir = false;  // a GameSir pad, from any source (see MergeGameSir)
+    bool exact = false;    // the vendor's own battery value, preferred over Windows' when merging
     bool noAlert = false;  // the value may belong to someone else's device: show it, never alert on it
 };
 
@@ -51,6 +53,7 @@ std::wstring DataDir();          // folder next to the exe if writable, else %AP
 std::wstring ExePath();
 std::wstring Hex4(unsigned v);
 std::wstring Fmt(const wchar_t* fmt, ...);
+bool IsJunkName(const std::wstring& name);  // garbage a sleeping device can report, e.g. "ZZZZZZZZ"
 ULONGLONG AwakeMs();             // milliseconds, not counting time the PC was asleep
 
 // ---- icons.cpp ----
@@ -113,6 +116,8 @@ void PollAirPods(PollContext& ctx);
 void PollSteelSeries(PollContext& ctx);
 void PollMice(PollContext& ctx);
 void PollGamepads(PollContext& ctx);
+int BestBattery(const std::vector<int>& levels);
+void MergeGameSir(std::vector<Reading>& out, int receivers);
 void PollLogitech(PollContext& ctx);   // vendors.cpp
 void ShutdownPollers();
 

@@ -87,6 +87,8 @@ DWORD WINAPI ThreadMain(void*) {
         Run(L"gamepads", PollGamepads, ctx);
 
         RemoveDuplicates(ctx.out);
+        for (Reading& r : ctx.out)
+            if (IsJunkName(r.name)) r.name.clear();  // the UI keeps the last good name
 
         if (diag) {
             std::wstring head = L"Juice diagnostics\r\n=================\r\n\r\n-- Readings --\r\n";

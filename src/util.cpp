@@ -4,6 +4,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cwctype>
 #include <mutex>
 
 std::wstring ExePath() {
@@ -56,6 +57,17 @@ std::wstring Fmt(const wchar_t* fmt, ...) {
     vswprintf(buf, 2048, fmt, ap);
     va_end(ap);
     return buf;
+}
+
+bool IsJunkName(const std::wstring& name) {
+    std::wstring t;
+    for (wchar_t c : name) {
+        if (c < 0x20 || c == 0x7F || c == 0xFFFD) return true;
+        if (c != L' ') t += (wchar_t)towupper(c);
+    }
+    if (t.empty()) return true;
+    if (t.size() < 3) return false;
+    return t.find_first_not_of(t[0]) == std::wstring::npos;  // one character repeated
 }
 
 void Log(const wchar_t* fmt, ...) {

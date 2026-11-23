@@ -54,6 +54,7 @@ struct LogiDevice {
     std::wstring name;
     Kind kind = Kind::Mouse;
     bool probed = false;
+    bool nameOk = false;  // a sleeping device can answer with garbage: ask again once it is awake
     ULONGLONG nextProbe = 0;  // devices that didn't answer are asked again later (they may be off)
 };
 std::map<std::wstring, LogiDevice> g_logi;  // key: collection path + "#" + device index
@@ -186,7 +187,10 @@ void PollLogitech(PollContext& ctx) {
                 }
                 dev.nameIndex = FeatureIndex(d, idx, 0x0005);
                 if (dev.nameIndex) dev.name = HidppName(d, idx, dev.nameIndex);
-                dev.kind = HidppKind(d, idx, dev.nameIndex, KindFromProduct(dev.name.empty() ? c.product : dev.name, Kind::Mouse));
+                dev.nameOk = !IsJunkName(dev.name);
+                if (!dev.nameOk) dev.name.clear();
+                dev.kind = dev.nameOk ? HidppKind(d, idx, dev.nameIndex, KindFromProduct(dev.name, Kind::Mouse))
+                                      : KindFromProduct(c.product, Kind::Mouse);
                 if (dev.name.empty()) dev.name = receiver ? L"Logitech device" : (c.product.empty() ? L"Logitech device" : c.product);
                 dev.probed = true;
             }
@@ -223,6 +227,14 @@ void PollLogitech(PollContext& ctx) {
                 // turned off or out of range: ask the features again next time it shows up
                 if (receiver) { dev.probed = false; dev.nextProbe = now + 60 * 1000; }
                 continue;
+            }
+            if (!dev.nameOk && dev.nameIndex) {
+                std::wstring fresh = HidppName(d, idx, dev.nameIndex);
+                if (!IsJunkName(fresh)) {
+                    dev.name = fresh;
+                    dev.nameOk = true;
+                    dev.kind = HidppKind(d, idx, dev.nameIndex, KindFromProduct(fresh, Kind::Mouse));
+                }
             }
             if (pct < 0 || pct > 100) continue;
             Reading s;

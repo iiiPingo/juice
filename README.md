@@ -3,6 +3,13 @@
 <p align="center">Battery levels of your wireless devices, right in the Windows tray.</p>
 <p align="center"><a href="../../releases/latest"><b>Download the latest release</b></a></p>
 
+## New in 1.3.0
+- Show device names in the widget with a new setting (tray menu, Show device names).
+- Rename any device or hide it from the tray and widget (tray menu, Devices). Your choices are saved.
+- A GameSir controller on a 2.4 GHz receiver no longer shows up twice with different batteries.
+- A device that reports a garbage name while asleep keeps its real name.
+- Diagnostics now lists every controller reading and where it came from.
+
 ## New in 1.2.0
 - Cleaner widget with modern device icons, level bars, and separate left, right and case readings for earbuds.
 - A mouse receiver that reconnects no longer goes grey until Juice restarts.
@@ -24,7 +31,7 @@ Xbox (Bluetooth) and GameSir controllers. Not yet: Razer, Corsair, HyperX receiv
 Tested with Sony WH-1000XM5 headphones and an Attack Shark X1 mouse.
 
 ## Install
-1. Download `Juice-1.2.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
+1. Download `Juice-1.3.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
 2. Run `Juice.exe`. If SmartScreen warns, click **More info > Run anyway** (the exe is unsigned).
 
 ## Build

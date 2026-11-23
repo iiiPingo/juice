@@ -18,6 +18,9 @@ using ABI::Windows::System::Power::BatteryStatus;
 #include <windows.devices.power.h>
 #include <windows.gaming.input.h>
 
+#include <cwctype>
+#include <set>
+
 using namespace ABI::Windows::Gaming::Input;
 using ABI::Windows::Devices::Power::IBatteryReport;
 
@@ -74,6 +77,7 @@ void PollWgi(PollContext& ctx) {
             Rel(raw2);
         }
         int pct = -1;
+        INT32 remaining = 0, capacity = 0;
         bool charging = false;
         IGameControllerBatteryInfo* info = nullptr;
         IBatteryReport* report = nullptr;
@@ -89,6 +93,8 @@ void PollWgi(PollContext& ctx) {
             INT32 r = 0, f = 0;
             if (rem) rem->get_Value(&r);
             if (full) full->get_Value(&f);
+            remaining = r;
+            capacity = f;
             ABI::Windows::System::Power::BatteryStatus st = ABI::Windows::System::Power::BatteryStatus_NotPresent;
             report->get_Status(&st);
             if (f > 0 && st != ABI::Windows::System::Power::BatteryStatus_NotPresent) {
@@ -103,7 +109,8 @@ void PollWgi(PollContext& ctx) {
         Rel(report);
         Rel(info);
         Rel(raw);
-        ctx.D(Fmt(L"  controller %04X:%04X \"%ls\" battery=%d%ls", vid, pid, name.c_str(), pct, charging ? L" charging" : L""));
+        ctx.D(Fmt(L"  reading [Windows.Gaming.Input] %04X:%04X \"%ls\" battery=%d%% (raw %d / %d)%ls", vid, pid, name.c_str(), pct, remaining, capacity,
+                  charging ? L" charging" : L""));
         // Xbox-mode pads (GameSir in Xbox mode reports as Microsoft 045E or GameSir 3537). PlayStation
         // and Switch pads are skipped: Windows' numbers for them are not reliable.
         if (pct < 0 || (vid != 0x045E && vid != 0x3537)) continue;
@@ -112,6 +119,9 @@ void PollWgi(PollContext& ctx) {
         s.name = (vid == 0x3537 || name.empty() || name.find(L"Xbox") != std::wstring::npos) ? L"GameSir controller" : name;
         s.kind = Kind::Gamepad;
         s.via = L"Xbox mode";
+        std::wstring upperName = name;
+        for (auto& ch : upperName) ch = towupper(ch);
+        s.gamesir = vid == 0x3537 || upperName.find(L"GAMESIR") != std::wstring::npos;
         for (const HidInfo& h : ctx.hid)  // this exact pad over Bluetooth: replaces Windows' generic reading
             if (h.vid == vid && h.pid == pid && h.bluetooth) s.sameAs.push_back(h.container);
         s.percent = pct;
@@ -137,11 +147,13 @@ void PollGameSirNova(PollContext& ctx) {
             if (d.Read(r, 200) < 19) continue;
             if (r[0] == 0x01) found = true;
         }
-        ctx.D(Fmt(L"  gamesir nova %04X: %ls", c.pid, found ? Fmt(L"level byte %u", r[18]).c_str() : L"(no reply)"));
+        ctx.D(Fmt(L"  reading [GameSir vendor query] %04X: %ls", c.pid, found ? Fmt(L"level byte %u", r[18]).c_str() : L"(no reply)"));
         if (!found || (r[18] > 100 && r[18] != 0xFF)) continue;
         Reading s;
         s.key = L"pad:gamesir:" + Hex4(c.pid);
         s.name = L"GameSir controller";
+        s.gamesir = true;
+        s.exact = true;
         s.kind = Kind::Gamepad;
         s.via = c.pid == 0x100F ? L"USB cable" : L"2.4 GHz receiver";
         if (r[18] == 0xFF) s.charging = true;  // no level while charging: the last one is kept
@@ -154,8 +166,62 @@ void PollGameSirNova(PollContext& ctx) {
 
 }  // namespace
 
+// Windows' coarse battery steps. A number outside them is a real reading.
+int BestBattery(const std::vector<int>& levels) {
+    int best = -1;
+    bool bestFine = false;
+    for (int v : levels) {
+        if (v < 0) continue;
+        bool fine = v != 0 && v != 25 && v != 33 && v != 50 && v != 66 && v != 67 && v != 75 && v != 100;
+        if (best < 0 || (fine && !bestFine) || (fine == bestFine && v < best)) {
+            best = v;
+            bestFine = fine;
+        }
+    }
+    return best;
+}
+
+// One GameSir receiver can appear several times in Windows, each with its own battery number.
+// With exactly one GameSir USB device plugged in they are the same pad, so they become one entry.
+// With two or more, nothing is merged, because they may really be different controllers.
+void MergeGameSir(std::vector<Reading>& out, int receivers) {
+    if (receivers != 1) return;
+    std::vector<size_t> pads;
+    for (size_t i = 0; i < out.size(); i++)
+        if (out[i].gamesir && out[i].btContainer.empty()) pads.push_back(i);
+    if (pads.empty()) return;
+    Reading merged = out[pads[0]];
+    std::vector<int> levels;
+    int exactLevel = -1;
+    bool charging = false;
+    std::vector<std::wstring> same;
+    for (size_t i : pads) {
+        const Reading& r = out[i];
+        levels.push_back(r.percent);
+        if (r.exact && r.percent >= 0) exactLevel = r.percent;
+        charging |= r.charging;
+        same.insert(same.end(), r.sameAs.begin(), r.sameAs.end());
+        if (merged.name == L"GameSir controller" && r.name != merged.name) merged.name = r.name;
+    }
+    merged.key = L"pad:gamesir";  // stays the same whichever readings are present, so saved names and hiding stick
+    merged.percent = exactLevel >= 0 ? exactLevel : BestBattery(levels);
+    merged.charging = charging;
+    merged.sameAs = same;
+    for (auto it = pads.rbegin(); it != pads.rend(); ++it) out.erase(out.begin() + *it);
+    out.push_back(merged);
+}
+
 void PollGamepads(PollContext& ctx) {
     ctx.D(L"-- Controllers --");
     PollWgi(ctx);
     PollGameSirNova(ctx);
+    std::set<std::wstring> receivers;
+    for (const HidInfo& h : ctx.hid)
+        if (h.vid == 0x3537 && !h.bluetooth) {
+            receivers.insert(h.physical);
+            if (h.page == 0xFF7A) ctx.D(Fmt(L"  GameSir receiver %04X:%04X page FF7A \"%ls\"", h.vid, h.pid, h.product.c_str()));
+        }
+    size_t before = ctx.out.size();
+    MergeGameSir(ctx.out, (int)receivers.size());
+    ctx.D(Fmt(L"  GameSir USB devices: %zu, readings merged: %zu", receivers.size(), before - ctx.out.size()));
 }

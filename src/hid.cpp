@@ -24,7 +24,8 @@ std::wstring UsbParent(DEVINST inst) {
         if (CM_Get_Device_IDW(inst, id, MAX_DEVICE_ID_LEN, 0) != CR_SUCCESS) return L"";
         std::wstring s = id;
         for (auto& ch : s) ch = towupper(ch);
-        if (s.rfind(L"USB\\VID_", 0) == 0 && s.find(L"&MI_") == std::wstring::npos) return s;
+        // &MI_ is one interface of a composite device, &IG_ is its Xbox (XInput) interface.
+        if (s.rfind(L"USB\\VID_", 0) == 0 && s.find(L"&MI_") == std::wstring::npos && s.find(L"&IG_") == std::wstring::npos) return s;
         DEVINST parent = 0;
         if (CM_Get_Parent(&parent, inst, 0) != CR_SUCCESS) return L"";
         inst = parent;
