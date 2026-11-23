@@ -54,63 +54,83 @@ void AddEllipse(GraphicsPath& p, const Box& b, REAL cx, REAL cy, REAL rx, REAL r
     p.AddEllipse(b.X(cx - rx), b.Y(cy - ry), b.L(rx * 2), b.L(ry * 2));
 }
 
-// Renders body and holes for one device symbol into the masks.
+// Renders body and holes for one device symbol into the masks. Small sizes (tray) keep only the
+// cut-outs that stay readable; the widget's larger symbols get the full detail.
 void DrawGlyph(Kind kind, const Box& b, Graphics& body, Graphics& holes) {
     SolidBrush white(Color(255, 255, 255, 255));
     GraphicsPath p(FillModeWinding), h(FillModeWinding);
+    const bool detail = b.s >= 18;
     switch (kind) {
         case Kind::Mouse:
-            AddRoundRect(p, b, 0.20f, 0.03f, 0.80f, 0.97f, 0.30f);
-            AddRoundRect(h, b, 0.465f, 0.00f, 0.535f, 0.40f, 0.0f);  // button split
-            AddRoundRect(h, b, 0.10f, 0.40f, 0.90f, 0.47f, 0.0f);    // buttons / palm
+            AddRoundRect(p, b, 0.21f, 0.03f, 0.79f, 0.97f, 0.29f);
+            AddRoundRect(h, b, 0.455f, 0.15f, 0.545f, 0.38f, 0.045f);  // scroll wheel
+            if (detail) {
+                AddRoundRect(h, b, 0.485f, 0.00f, 0.515f, 0.15f, 0.0f);   // button split
+                AddRoundRect(h, b, 0.21f, 0.475f, 0.79f, 0.505f, 0.0f);   // palm line
+            }
             break;
-        case Kind::Keyboard:
-            // a low keyboard: two rows of keys and a space bar cut out of the body
-            AddRoundRect(p, b, 0.02f, 0.24f, 0.98f, 0.78f, 0.10f);
+        case Kind::Keyboard: {
+            AddRoundRect(p, b, 0.02f, 0.21f, 0.98f, 0.79f, 0.11f);
+            int cols = detail ? 7 : 5;
+            REAL left = 0.10f, span = 0.80f, gap = detail ? 0.028f : 0.04f;
+            REAL w = (span - gap * (cols - 1)) / cols;
             for (int row = 0; row < 2; row++)
-                for (int k = 0; k < 5; k++) {
-                    REAL x = 0.11f + k * 0.165f, y = 0.33f + row * 0.15f;
-                    AddRoundRect(h, b, x, y, x + 0.12f, y + 0.10f, 0.0f);
+                for (int k = 0; k < cols; k++) {
+                    REAL x = left + k * (w + gap), y = 0.31f + row * 0.135f;
+                    AddRoundRect(h, b, x, y, x + w, y + 0.09f, detail ? 0.015f : 0.0f);
                 }
-            AddRoundRect(h, b, 0.27f, 0.63f, 0.73f, 0.70f, 0.0f);
+            AddRoundRect(h, b, 0.28f, 0.60f, 0.72f, 0.68f, detail ? 0.03f : 0.0f);  // space bar
             break;
-        case Kind::Gamepad:
-            AddRoundRect(p, b, 0.03f, 0.22f, 0.97f, 0.64f, 0.18f);
-            AddEllipse(p, b, 0.23f, 0.64f, 0.19f, 0.25f);  // grips
-            AddEllipse(p, b, 0.77f, 0.64f, 0.19f, 0.25f);
-            AddRoundRect(h, b, 0.14f, 0.40f, 0.36f, 0.47f, 0.0f);  // d-pad
-            AddRoundRect(h, b, 0.215f, 0.325f, 0.285f, 0.545f, 0.0f);
-            AddEllipse(h, b, 0.68f, 0.37f, 0.055f, 0.055f);  // buttons
-            AddEllipse(h, b, 0.78f, 0.48f, 0.055f, 0.055f);
+        }
+        case Kind::Gamepad: {
+            // One smooth outline with two grips.
+            auto X = [&](REAL u) { return b.X(u); };
+            auto Y = [&](REAL v) { return b.Y(v); };
+            p.StartFigure();
+            p.AddLine(X(0.29f), Y(0.21f), X(0.71f), Y(0.21f));
+            p.AddBezier(X(0.71f), Y(0.21f), X(0.86f), Y(0.21f), X(0.93f), Y(0.33f), X(0.98f), Y(0.62f));
+            p.AddBezier(X(0.98f), Y(0.62f), X(1.01f), Y(0.80f), X(0.87f), Y(0.86f), X(0.78f), Y(0.76f));
+            p.AddBezier(X(0.78f), Y(0.76f), X(0.73f), Y(0.70f), X(0.70f), Y(0.63f), X(0.62f), Y(0.63f));
+            p.AddLine(X(0.62f), Y(0.63f), X(0.38f), Y(0.63f));
+            p.AddBezier(X(0.38f), Y(0.63f), X(0.30f), Y(0.63f), X(0.27f), Y(0.70f), X(0.22f), Y(0.76f));
+            p.AddBezier(X(0.22f), Y(0.76f), X(0.13f), Y(0.86f), X(-0.01f), Y(0.80f), X(0.02f), Y(0.62f));
+            p.AddBezier(X(0.02f), Y(0.62f), X(0.07f), Y(0.33f), X(0.14f), Y(0.21f), X(0.29f), Y(0.21f));
+            p.CloseFigure();
+            AddRoundRect(h, b, 0.17f, 0.385f, 0.37f, 0.445f, 0.0f);  // d-pad
+            AddRoundRect(h, b, 0.24f, 0.315f, 0.30f, 0.515f, 0.0f);
+            AddEllipse(h, b, 0.67f, 0.46f, 0.05f, 0.05f);  // buttons
+            AddEllipse(h, b, 0.77f, 0.36f, 0.05f, 0.05f);
             break;
+        }
         case Kind::Headphones:
         case Kind::Headset: {
             bool mic = kind == Kind::Headset;
-            REAL bandW = 0.10f;
+            REAL bandW = 0.09f;
             Pen band(Color(255, 255, 255, 255), b.L(bandW));
             band.SetStartCap(LineCapFlat);
             band.SetEndCap(LineCapFlat);
-            REAL top = 0.06f + bandW / 2;
-            body.DrawArc(&band, b.X(0.10f + bandW / 2), b.Y(top), b.L(0.80f - bandW), b.L(0.95f - top), 180, 180);
-            REAL cupBottom = mic ? 0.82f : 0.94f;
-            AddRoundRect(p, b, 0.04f, 0.46f, 0.30f, cupBottom, 0.09f);
-            AddRoundRect(p, b, 0.70f, 0.46f, 0.96f, cupBottom, 0.09f);
+            REAL r = 0.38f, cy = 0.05f + bandW / 2 + r;
+            body.DrawArc(&band, b.X(0.5f - r), b.Y(cy - r), b.L(r * 2), b.L(r * 2), 180, 180);
+            REAL cupBottom = mic ? 0.80f : 0.93f;
+            AddRoundRect(p, b, 0.04f, cy - 0.03f, 0.27f, cupBottom, 0.10f);
+            AddRoundRect(p, b, 0.73f, cy - 0.03f, 0.96f, cupBottom, 0.10f);
             if (mic) {
-                Pen boom(Color(255, 255, 255, 255), b.L(0.075f));
+                Pen boom(Color(255, 255, 255, 255), b.L(0.07f));
                 boom.SetStartCap(LineCapRound);
                 boom.SetEndCap(LineCapRound);
-                body.DrawBezier(&boom, b.X(0.17f), b.Y(0.80f), b.X(0.18f), b.Y(0.95f), b.X(0.30f), b.Y(0.95f), b.X(0.46f), b.Y(0.94f));
+                body.DrawBezier(&boom, b.X(0.15f), b.Y(0.80f), b.X(0.16f), b.Y(0.95f), b.X(0.30f), b.Y(0.95f), b.X(0.46f), b.Y(0.93f));
+                AddEllipse(p, b, 0.50f, 0.93f, 0.06f, 0.05f);
             }
             break;
         }
         case Kind::Earbuds:
-            // Two AirPods: round heads with stems hanging toward the middle.
-            AddEllipse(p, b, 0.29f, 0.25f, 0.19f, 0.19f);
-            AddRoundRect(p, b, 0.33f, 0.24f, 0.47f, 0.95f, 0.07f);
-            AddEllipse(p, b, 0.71f, 0.25f, 0.19f, 0.19f);
-            AddRoundRect(p, b, 0.53f, 0.24f, 0.67f, 0.95f, 0.07f);
-            AddEllipse(h, b, 0.24f, 0.22f, 0.055f, 0.055f);  // speaker openings
-            AddEllipse(h, b, 0.76f, 0.22f, 0.055f, 0.055f);
+            // A pair of stemmed earbuds.
+            AddEllipse(p, b, 0.28f, 0.26f, 0.21f, 0.21f);
+            AddRoundRect(p, b, 0.31f, 0.26f, 0.46f, 0.95f, 0.075f);
+            AddEllipse(p, b, 0.72f, 0.26f, 0.21f, 0.21f);
+            AddRoundRect(p, b, 0.54f, 0.26f, 0.69f, 0.95f, 0.075f);
+            AddEllipse(h, b, 0.22f, 0.23f, 0.06f, 0.06f);  // speaker openings
+            AddEllipse(h, b, 0.78f, 0.23f, 0.06f, 0.06f);
             break;
         default:
             AddEllipse(p, b, 0.5f, 0.5f, 0.42f, 0.42f);
@@ -120,7 +140,43 @@ void DrawGlyph(Kind kind, const Box& b, Graphics& body, Graphics& holes) {
     holes.FillPath(&white, &h);
 }
 
-void Render(Mask& body, Mask& holes, Kind kind, const Box& b) {
+// Small status symbols used inside the widget.
+void DrawSymbol(Sym sym, const Box& b, Graphics& body, Graphics& holes) {
+    SolidBrush white(Color(255, 255, 255, 255));
+    GraphicsPath p(FillModeWinding), h(FillModeWinding);
+    switch (sym) {
+        case Sym::BudLeft:
+            AddEllipse(p, b, 0.42f, 0.30f, 0.27f, 0.27f);
+            AddRoundRect(p, b, 0.47f, 0.30f, 0.67f, 0.97f, 0.10f);
+            AddEllipse(h, b, 0.34f, 0.27f, 0.08f, 0.08f);
+            break;
+        case Sym::BudRight:
+            AddEllipse(p, b, 0.58f, 0.30f, 0.27f, 0.27f);
+            AddRoundRect(p, b, 0.33f, 0.30f, 0.53f, 0.97f, 0.10f);
+            AddEllipse(h, b, 0.66f, 0.27f, 0.08f, 0.08f);
+            break;
+        case Sym::Case:
+            AddRoundRect(p, b, 0.06f, 0.18f, 0.94f, 0.86f, 0.25f);
+            AddRoundRect(h, b, 0.00f, 0.42f, 1.00f, 0.49f, 0.0f);  // lid line
+            AddEllipse(h, b, 0.50f, 0.67f, 0.06f, 0.06f);          // status light
+            break;
+        case Sym::Bolt: {
+            PointF pts[] = { PointF(b.X(0.60f), b.Y(0.02f)), PointF(b.X(0.16f), b.Y(0.58f)), PointF(b.X(0.46f), b.Y(0.58f)),
+                             PointF(b.X(0.38f), b.Y(0.98f)), PointF(b.X(0.84f), b.Y(0.40f)), PointF(b.X(0.54f), b.Y(0.40f)) };
+            p.AddPolygon(pts, 6);
+            break;
+        }
+        case Sym::Moon:
+            AddEllipse(p, b, 0.48f, 0.52f, 0.42f, 0.42f);
+            AddEllipse(h, b, 0.68f, 0.36f, 0.36f, 0.36f);
+            break;
+    }
+    body.FillPath(&white, &p);
+    holes.FillPath(&white, &h);
+}
+
+template <class DrawFn>
+void Render(Mask& body, Mask& holes, DrawFn draw) {
     Bitmap bb(body.w, body.h, PixelFormat32bppARGB), hb(holes.w, holes.h, PixelFormat32bppARGB);
     {
         Graphics gb(&bb), gh(&hb);
@@ -129,7 +185,7 @@ void Render(Mask& body, Mask& holes, Kind kind, const Box& b) {
             g->SetSmoothingMode(SmoothingModeAntiAlias);
             g->SetPixelOffsetMode(PixelOffsetModeHalf);
         }
-        DrawGlyph(kind, b, gb, gh);
+        draw(gb, gh);
     }
     for (auto [bmp, m] : { std::pair<Bitmap*, Mask*>{ &bb, &body }, std::pair<Bitmap*, Mask*>{ &hb, &holes } }) {
         BitmapData bd;
@@ -187,15 +243,20 @@ HICON ToIcon(const Canvas& cv) {
     return icon;
 }
 
-void PaintGlyph(Canvas& cv, Kind kind, COLORREF fg, int x0, int y0, int side) {
-    Mask body(cv.s, cv.s), holes(cv.s, cv.s);
-    Render(body, holes, kind, Box{ (REAL)x0, (REAL)y0, (REAL)side });
+void Composite(Canvas& cv, const Mask& body, const Mask& holes, COLORREF fg) {
     for (int y = 0; y < cv.s; y++)
         for (int x = 0; x < cv.s; x++) {
             size_t i = (size_t)y * cv.s + x;
             int a = body.a[i] * (255 - holes.a[i]) / 255;
             cv.Over(x, y, fg, (BYTE)a);
         }
+}
+
+void PaintGlyph(Canvas& cv, Kind kind, COLORREF fg, int x0, int y0, int side) {
+    Mask body(cv.s, cv.s), holes(cv.s, cv.s);
+    Box b{ (REAL)x0, (REAL)y0, (REAL)side };
+    Render(body, holes, [&](Graphics& gb, Graphics& gh) { DrawGlyph(kind, b, gb, gh); });
+    Composite(cv, body, holes, fg);
 }
 
 }  // namespace
@@ -275,6 +336,16 @@ HICON MakeDeviceIcon(Kind kind, int pct, COLORREF fg, COLORREF fill, int s) {
 HICON MakeGlyphIcon(Kind kind, COLORREF fg, int s) {
     Canvas cv(s);
     PaintGlyph(cv, kind, fg, 0, 0, s);
+    return ToIcon(cv);
+}
+
+// A status symbol (left bud, right bud, case, charging bolt, asleep moon).
+HICON MakeSymbolIcon(Sym sym, COLORREF fg, int s) {
+    Canvas cv(s);
+    Mask body(s, s), holes(s, s);
+    Box b{ 0, 0, (REAL)s };
+    Render(body, holes, [&](Graphics& gb, Graphics& gh) { DrawSymbol(sym, b, gb, gh); });
+    Composite(cv, body, holes, fg);
     return ToIcon(cv);
 }
 

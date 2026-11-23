@@ -7,10 +7,25 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <set>
 
 void ShutdownMice();
 void ShutdownVendors();
 void ShutdownAirPods();
+
+// The same device seen twice (e.g. a controller in Xbox mode over Bluetooth): keep the dedicated
+// reading and drop Windows' generic one for that exact device only, so a Bluetooth mouse stays
+// listed next to a separate 2.4 GHz mouse.
+void RemoveDuplicates(std::vector<Reading>& out) {
+    std::set<std::wstring> duplicates;
+    for (const Reading& r : out)
+        if (r.btContainer.empty())
+            for (const std::wstring& id : r.sameAs)
+                if (!id.empty()) duplicates.insert(id);
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [&](const Reading& r) { return !r.btContainer.empty() && duplicates.count(r.btContainer) != 0; }),
+              out.end());
+}
 
 namespace {
 
@@ -71,18 +86,7 @@ DWORD WINAPI ThreadMain(void*) {
         Run(L"logitech", PollLogitech, ctx);
         Run(L"gamepads", PollGamepads, ctx);
 
-        // The same device seen twice (e.g. a controller in Xbox mode over Bluetooth): keep the
-        // dedicated reading, drop Windows' generic Bluetooth one.
-        auto has = [&](Kind k, bool dedicated) {
-            return std::any_of(ctx.out.begin(), ctx.out.end(),
-                               [&](const Reading& r) { return r.kind == k && (r.btContainer.empty() == dedicated); });
-        };
-        for (Kind k : { Kind::Gamepad, Kind::Mouse }) {
-            if (!has(k, true)) continue;
-            ctx.out.erase(std::remove_if(ctx.out.begin(), ctx.out.end(),
-                                         [&](const Reading& r) { return r.kind == k && !r.btContainer.empty(); }),
-                          ctx.out.end());
-        }
+        RemoveDuplicates(ctx.out);
 
         if (diag) {
             std::wstring head = L"Juice diagnostics\r\n=================\r\n\r\n-- Readings --\r\n";
@@ -137,10 +141,14 @@ void RequestDiagnostics() {
 
 ULONGLONG PollerHeartbeat() { return g_heartbeat; }
 
-void StopPoller() {
+bool StopPoller() {
     g_stop = true;
     RequestPoll();
-    if (g_thread && WaitForSingleObject(g_thread, 3000) != WAIT_OBJECT_0) Log(L"poller did not stop in time");
+    if (g_thread && WaitForSingleObject(g_thread, 3000) != WAIT_OBJECT_0) {
+        Log(L"poller did not stop in time");
+        return false;
+    }
+    return true;
 }
 
 void ShutdownPollers() {}

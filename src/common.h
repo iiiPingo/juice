@@ -40,7 +40,9 @@ struct Reading {
     bool leftChg = false, rightChg = false, boxChg = false;
     std::wstring via;    // "Bluetooth", "2.4 GHz receiver", ...
     int graceSec = 120;  // how long the last value stays on screen after the device goes quiet
-    std::wstring btContainer;  // for de-duplicating Bluetooth readings
+    std::wstring btContainer;  // set on Windows' generic Bluetooth readings
+    std::vector<std::wstring> sameAs;  // Bluetooth containers this dedicated reading replaces
+    bool noAlert = false;  // the value may belong to someone else's device: show it, never alert on it
 };
 
 // ---- util.cpp ----
@@ -57,6 +59,8 @@ void IconsShutdown();
 HICON MakeDeviceIcon(Kind kind, int pct, COLORREF fg, COLORREF fill, int size);
 HICON MakeGlyphIcon(Kind kind, COLORREF fg, int size);
 HICON MakeNumberIcon(const std::wstring& text, COLORREF color, int size);
+enum class Sym { BudLeft, BudRight, Case, Bolt, Moon };  // small status symbols for the widget
+HICON MakeSymbolIcon(Sym sym, COLORREF fg, int size);
 
 // ---- hid.cpp ----
 struct HidInfo {
@@ -64,8 +68,12 @@ struct HidInfo {
     USHORT vid = 0, pid = 0, page = 0, usage = 0;
     USHORT inLen = 0, outLen = 0, featLen = 0;
     int iface = -1;  // from "&mi_xx" in the path, -1 if none
+    std::wstring physical;   // identifies the physical device across its interfaces
+    std::wstring container;  // Windows' device container id
+    bool bluetooth = false;  // this collection runs over Bluetooth
 };
 std::vector<HidInfo> EnumHid();
+std::wstring ReceiverTag(const std::vector<HidInfo>& all, const HidInfo& c);
 
 class Hid {
 public:
@@ -74,6 +82,7 @@ public:
     bool OpenNoAccess(const HidInfo& c);  // feature reports only
     void Close();
     bool ok() const { return h_ != INVALID_HANDLE_VALUE; }
+    bool Failed() const { return failed_; }  // the handle died (device removed, driver stuck): reopen it
     const HidInfo& info() const { return c_; }
     bool Write(const std::vector<BYTE>& data, int timeoutMs = 500);
     // Reads one input report (leading report id 0 dropped, like hidapi). Returns bytes or -1.
@@ -85,6 +94,7 @@ public:
 private:
     HANDLE h_ = INVALID_HANDLE_VALUE;
     bool overlapped_ = false;
+    bool failed_ = false;
     HidInfo c_;
 };
 
@@ -111,4 +121,4 @@ void StartPoller(HWND notify, UINT msg);  // posts msg with a heap std::vector<R
 void RequestPoll();
 void RequestDiagnostics();                // posts msg with wParam=1 and a heap std::wstring* in lParam
 ULONGLONG PollerHeartbeat();
-void StopPoller();
+bool StopPoller();                        // false if the thread is still running after the wait

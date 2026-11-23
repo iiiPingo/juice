@@ -65,13 +65,20 @@ struct Settings {
     bool autostart = true;
     int iconStyle = 0;  // 0 = device symbol + ring, 1 = number
     void Load() {
-        alertAt = GetInt(L"AlertAt", 20);
+        // Hand-edited or damaged values fall back to the default instead of changing behaviour.
+        wchar_t raw[32] = {};
+        GetPrivateProfileStringW(kAppName, L"AlertAt", L"20", raw, 32, IniPath().c_str());
+        wchar_t* end = nullptr;
+        long parsed = wcstol(raw, &end, 10);
+        bool valid = end != raw && *end == 0 &&
+                     (parsed == 0 || parsed == 10 || parsed == 15 || parsed == 20 || parsed == 25 || parsed == 30);
+        alertAt = valid ? (int)parsed : 20;
         widget = GetInt(L"Widget", 1) != 0;
         onTop = GetInt(L"WidgetOnTop", 0) != 0;
         wx = GetInt(L"WidgetX", INT_MIN);
         wy = GetInt(L"WidgetY", INT_MIN);
         autostart = GetInt(L"Autostart", 1) != 0;
-        iconStyle = GetInt(L"IconStyle", 0);
+        iconStyle = GetInt(L"IconStyle", 0) == 1 ? 1 : 0;
     }
 } g_set;
 
@@ -85,13 +92,15 @@ struct Entry {
     UINT iconId = 0;
     HICON icon = nullptr;
     std::wstring iconSig, tipSig;
-    bool alerted = false, alertPending = false;
+    bool alertPending = false;
 };
 
 HINSTANCE g_inst;
 HWND g_msgWnd = nullptr, g_widget = nullptr;
 UINT g_taskbarCreated = 0;
 std::map<std::wstring, Entry> g_devs;
+std::set<std::wstring> g_alerted;  // devices already warned about; survives them dropping off the list
+bool g_exiting = false;
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
 bool g_firstRun = false;
@@ -166,7 +175,9 @@ std::wstring PctText(int v) { return v < 0 ? L"?" : std::to_wstring(v) + L"%"; }
 // ---- tray icon drawing (icons.cpp) ----------------------------------------------------------------
 
 int TrayIconSize() {
-    int s = GetSystemMetrics(SM_CXSMICON);
+    // The current scale, so icons stay sharp after a display scale change without a restart.
+    UINT dpi = g_msgWnd ? GetDpiForWindow(g_msgWnd) : 0;
+    int s = dpi ? GetSystemMetricsForDpi(SM_CXSMICON, dpi) : GetSystemMetrics(SM_CXSMICON);
     return s > 0 ? s : 16;
 }
 
@@ -182,7 +193,7 @@ std::wstring TipFor(const Entry& e) {
         if (e.r.charging) t += L" \x26A1 charging";
     }
     if (e.stale) {
-        ULONGLONG mins = (GetTickCount64() - e.lastSeen) / 60000;
+        ULONGLONG mins = (AwakeMs() - e.lastSeen) / 60000;
         t += mins ? Fmt(L"\n(asleep, last seen %llu min ago)", mins) : std::wstring(L"\n(asleep)");
     }
     if (t.size() > 127) t.resize(127);
@@ -318,10 +329,12 @@ void PromoteIcons() {
 bool UserBusy() {
     QUERY_USER_NOTIFICATION_STATE s;
     if (FAILED(SHQueryUserNotificationState(&s))) return false;
-    return s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE;
+    // Locked / screen off and quiet hours count too: hold the alert until it can actually be seen.
+    return s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE || s == QUNS_NOT_PRESENT ||
+           s == QUNS_QUIET_TIME;
 }
 
-void ShowAlert(Entry& e) {
+bool ShowAlert(Entry& e) {
     NOTIFYICONDATAW nid;
     FillNid(nid, e.iconId);
     nid.uFlags = NIF_INFO;
@@ -331,8 +344,9 @@ void ShowAlert(Entry& e) {
                                  : (PctText(e.r.percent) + L" left. Time to charge.");
     wcsncpy(nid.szInfoTitle, title.c_str(), 63);
     wcsncpy(nid.szInfo, body.c_str(), 255);
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
+    if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) return false;  // e.g. Explorer restarting: retried shortly
     Log(L"alert: %ls %d%%", e.r.name.c_str(), e.r.percent);
+    return true;
 }
 
 void CheckAlerts() {
@@ -340,18 +354,21 @@ void CheckAlerts() {
     for (auto& [k, e] : g_devs) {
         int pct = e.r.percent;
         if (e.r.charging || pct >= g_set.alertAt + 5) {
-            e.alerted = false;
+            g_alerted.erase(k);  // charged again: the next low level gets a new alert
             e.alertPending = false;
             continue;
         }
-        if (e.stale || pct < 0 || pct > g_set.alertAt || e.alerted || !e.iconAdded) continue;
+        if (e.stale || e.r.noAlert || pct < 0 || pct > g_set.alertAt || g_alerted.count(k) || !e.iconAdded) continue;
         if (UserBusy()) {
-            e.alertPending = true;  // gaming / full screen: tell later
+            e.alertPending = true;  // gaming / full screen / locked: tell later
             continue;
         }
-        ShowAlert(e);
-        e.alerted = true;
-        e.alertPending = false;
+        if (ShowAlert(e)) {
+            g_alerted.insert(k);
+            e.alertPending = false;
+        } else {
+            e.alertPending = true;
+        }
     }
 }
 
@@ -434,14 +451,14 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
     for (auto& [k, e] : g_devs)
         if (e.iconAdded) DeleteIcon(e.iconId);
     if (g_placeholder) DeleteIcon(kPlaceholderIcon);
-    RelaunchSelf();
+    if (!g_exiting) RelaunchSelf();  // a problem while closing must not bring Juice back
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
 // ---- widget ---------------------------------------------------------------------------------------
 
 struct WidgetFonts {
-    HFONT name = nullptr, pct = nullptr, small = nullptr, glyph = nullptr, bolt = nullptr;
+    HFONT name = nullptr, pct = nullptr, tiny = nullptr;
     int dpi = 0;
 } g_wf;
 
@@ -449,26 +466,15 @@ int Sc(int v, int dpi) { return MulDiv(v, dpi, 96); }
 
 void EnsureFonts(int dpi) {
     if (g_wf.dpi == dpi && g_wf.name) return;
-    for (HFONT* f : { &g_wf.name, &g_wf.pct, &g_wf.small, &g_wf.glyph, &g_wf.bolt })
+    for (HFONT* f : { &g_wf.name, &g_wf.pct, &g_wf.tiny })
         if (*f) DeleteObject(*f);
     auto mk = [&](int px, int weight, const wchar_t* face) {
         return CreateFontW(-Sc(px, dpi), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
                            CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
     };
-    g_wf.name = mk(13, FW_NORMAL, L"Segoe UI");
-    g_wf.pct = mk(14, FW_SEMIBOLD, L"Segoe UI");
-    g_wf.small = mk(11, FW_NORMAL, L"Segoe UI");
-    // Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10 (same code points).
-    LOGFONTW lf{};
-    lf.lfCharSet = DEFAULT_CHARSET;
-    wcscpy(lf.lfFaceName, L"Segoe Fluent Icons");
-    HDC dc = GetDC(nullptr);
-    bool fluent = false;
-    EnumFontFamiliesExW(dc, &lf, [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM p) -> int { *(bool*)p = true; return 0; },
-                        (LPARAM)&fluent, 0);
-    ReleaseDC(nullptr, dc);
-    g_wf.glyph = mk(16, FW_NORMAL, fluent ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets");
-    g_wf.bolt = mk(12, FW_NORMAL, L"Segoe UI Symbol");
+    g_wf.name = mk(13, FW_NORMAL, L"Segoe UI Variable Text");
+    g_wf.pct = mk(15, FW_SEMIBOLD, L"Segoe UI Variable Text");
+    g_wf.tiny = mk(12, FW_NORMAL, L"Segoe UI Variable Text");
     g_wf.dpi = dpi;
 }
 
@@ -482,16 +488,38 @@ HICON WidgetGlyph(Kind k, COLORREF c, int size) {
     return i;
 }
 
-int RowHeight(const Entry& e, int dpi) { return Sc(e.r.buds || e.stale ? 54 : 40, dpi); }
-
-SIZE WidgetSize(int dpi) {
-    int h = Sc(8, dpi) * 2;
-    auto list = Ordered();
-    if (list.empty()) h += Sc(40, dpi);
-    for (Entry* e : list) h += RowHeight(*e, dpi);
-    return { Sc(270, dpi), h };
+HICON WidgetSymbol(Sym sym, COLORREF c, int size) {
+    static std::map<std::wstring, HICON> cache;
+    std::wstring key = Fmt(L"%d|%06X|%d", (int)sym, (unsigned)c, size);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    HICON i = MakeSymbolIcon(sym, c, size);
+    cache[key] = i;
+    return i;
 }
 
+int RowHeight(const Entry& e, int dpi) { return Sc(e.r.buds ? 62 : 42, dpi); }
+
+SIZE WidgetSize(int dpi) {
+    int h = Sc(6, dpi) * 2;
+    auto list = Ordered();
+    if (list.empty()) h += Sc(42, dpi);
+    for (Entry* e : list) h += RowHeight(*e, dpi);
+    return { Sc(224, dpi), h };
+}
+
+void FillPill(HDC dc, const RECT& r, COLORREF c) {
+    if (r.right <= r.left) return;
+    HBRUSH b = CreateSolidBrush(c);
+    HGDIOBJ oldB = SelectObject(dc, b), oldP = SelectObject(dc, GetStockObject(NULL_PEN));
+    int h = r.bottom - r.top;
+    RoundRect(dc, r.left, r.top, r.right + 1, r.bottom + 1, h, h);
+    SelectObject(dc, oldB);
+    SelectObject(dc, oldP);
+    DeleteObject(b);
+}
+
+// Each device is its symbol, a level bar and the percentage. The name stays in the tray tooltip.
 void PaintWidget(HWND hwnd, HDC target) {
     int dpi = GetDpiForWindow(hwnd);
     if (!dpi) dpi = 96;
@@ -501,84 +529,89 @@ void PaintWidget(HWND hwnd, HDC target) {
     HDC dc = CreateCompatibleDC(target);
     HBITMAP bmp = CreateCompatibleBitmap(target, rc.right, rc.bottom);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
+    HGDIOBJ oldFont = GetCurrentObject(dc, OBJ_FONT);
     HBRUSH bg = CreateSolidBrush(RGB(0x20, 0x20, 0x20));
     FillRect(dc, &rc, bg);
     DeleteObject(bg);
     SetBkMode(dc, TRANSPARENT);
 
-    int pad = Sc(12, dpi);
-    int y = Sc(8, dpi);
+    int pad = Sc(14, dpi);
+    int y = Sc(6, dpi);
+    const COLORREF chargeCol = ToneColor(Tone::Charging, false);
     auto list = Ordered();
     if (list.empty()) {
         SelectObject(dc, g_wf.name);
         SetTextColor(dc, RGB(0xA0, 0xA0, 0xA0));
-        RECT t{ pad, y, rc.right - pad, y + Sc(40, dpi) };
-        DrawTextW(dc, L"Looking for your devices...\nTurn one on and it shows up here.", -1, &t, DT_LEFT | DT_WORDBREAK);
+        RECT t{ pad, y, rc.right - pad, y + Sc(42, dpi) };
+        DrawTextW(dc, L"Looking for your devices...", -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     for (Entry* e : list) {
-        int rowH = RowHeight(*e, dpi);
+        const int topH = Sc(42, dpi);
         Tone tone = ToneFor(*e);
         COLORREF accent = ToneColor(tone, false);
-        // Device symbol (same drawing as the tray icon)
-        int gs = Sc(22, dpi);
-        HICON gi = WidgetGlyph(e->r.kind, e->stale ? RGB(0x70, 0x70, 0x70) : RGB(0xE0, 0xE0, 0xE0), gs);
-        if (gi) DrawIconEx(dc, pad, y + Sc(4, dpi), gi, gs, gs, 0, nullptr, DI_NORMAL);
-        int x0 = pad + Sc(32, dpi);
-        // Percent (right) with a bolt while charging
+        int gs = Sc(26, dpi);
+        HICON gi = WidgetGlyph(e->r.kind, e->stale ? RGB(0x70, 0x70, 0x70) : RGB(0xF2, 0xF2, 0xF2), gs);
+        if (gi) DrawIconEx(dc, pad, y + (topH - gs) / 2, gi, gs, gs, 0, nullptr, DI_NORMAL);
+        int x0 = pad + gs + Sc(12, dpi);
+
+        // Percent in a fixed column, so the bars of all rows line up.
+        int pctW = Sc(44, dpi);
+        RECT p{ rc.right - pad - pctW, y, rc.right - pad, y + topH };
         std::wstring pct = PctText(e->r.percent);
         SelectObject(dc, g_wf.pct);
         SetTextColor(dc, tone == Tone::Normal ? RGB(0xFF, 0xFF, 0xFF) : accent);
-        RECT p{ x0, y + Sc(4, dpi), rc.right - pad, y + Sc(24, dpi) };
         DrawTextW(dc, pct.c_str(), -1, &p, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-        SIZE pctSz{};
-        GetTextExtentPoint32W(dc, pct.c_str(), (int)pct.size(), &pctSz);
-        int nameRight = rc.right - pad - pctSz.cx - Sc(6, dpi);
-        if (e->r.charging) {
-            SelectObject(dc, g_wf.bolt);
-            SetTextColor(dc, ToneColor(Tone::Charging, false));
-            RECT b{ x0, y + Sc(4, dpi), nameRight, y + Sc(24, dpi) };
-            DrawTextW(dc, L"\x26A1", -1, &b, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            nameRight -= Sc(14, dpi);
+
+        // Status: a bolt while charging, a moon while asleep.
+        int barRight = p.left - Sc(8, dpi);
+        int ss = Sc(14, dpi);
+        if (e->stale || e->r.charging) {
+            HICON si = e->stale ? WidgetSymbol(Sym::Moon, RGB(0x8C, 0x8C, 0x8C), ss) : WidgetSymbol(Sym::Bolt, chargeCol, ss);
+            if (si) DrawIconEx(dc, barRight - ss, y + (topH - ss) / 2, si, ss, ss, 0, nullptr, DI_NORMAL);
+            barRight -= ss + Sc(6, dpi);
         }
-        // Name
-        SelectObject(dc, g_wf.name);
-        SetTextColor(dc, e->stale ? RGB(0x90, 0x90, 0x90) : RGB(0xF0, 0xF0, 0xF0));
-        RECT n{ x0, y + Sc(4, dpi), nameRight, y + Sc(24, dpi) };
-        DrawTextW(dc, e->r.name.c_str(), -1, &n, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
         // Level bar
-        int barY = y + Sc(28, dpi), barH = Sc(4, dpi);
-        RECT track{ x0, barY, rc.right - pad, barY + barH };
-        HBRUSH tb = CreateSolidBrush(RGB(0x3A, 0x3A, 0x3A));
-        FillRect(dc, &track, tb);
-        DeleteObject(tb);
-        if (e->r.percent >= 0) {
+        int barH = Sc(5, dpi), barY = y + (topH - barH) / 2;
+        RECT track{ x0, barY, barRight, barY + barH };
+        FillPill(dc, track, RGB(0x3A, 0x3A, 0x3A));
+        if (e->r.percent > 0) {
             RECT fill = track;
-            fill.right = track.left + (track.right - track.left) * e->r.percent / 100;
-            HBRUSH fb = CreateSolidBrush(tone == Tone::Normal ? RGB(0xC8, 0xC8, 0xC8) : accent);
-            FillRect(dc, &fill, fb);
-            DeleteObject(fb);
+            fill.right = track.left + std::max<int>(barH, (track.right - track.left) * std::min(e->r.percent, 100) / 100);
+            FillPill(dc, fill, e->stale ? RGB(0x6A, 0x6A, 0x6A) : tone == Tone::Normal ? RGB(0xD8, 0xD8, 0xD8) : accent);
         }
-        // Earbuds: left / right / case
+
+        // Earbuds: left bud, right bud, case
         if (e->r.buds) {
-            SelectObject(dc, g_wf.small);
-            SetTextColor(dc, RGB(0xB0, 0xB0, 0xB0));
-            auto part = [](const wchar_t* label, int v, bool c) {
-                return std::wstring(label) + L" " + PctText(v) + (c ? L" \x26A1" : L"");
-            };
-            std::wstring s = part(L"L", e->r.left, e->r.leftChg) + L"     " + part(L"R", e->r.right, e->r.rightChg) + L"     " +
-                             part(L"Case", e->r.box, e->r.boxChg);
-            if (e->stale) s += L"   (last seen)";
-            RECT t{ x0, barY + Sc(8, dpi), rc.right - pad, barY + Sc(24, dpi) };
-            DrawTextW(dc, s.c_str(), -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        } else if (e->stale) {
-            SelectObject(dc, g_wf.small);
-            SetTextColor(dc, RGB(0x80, 0x80, 0x80));
-            RECT t{ x0, barY + Sc(8, dpi), rc.right - pad, barY + Sc(24, dpi) };
-            DrawTextW(dc, L"asleep - last known level", -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            struct Part { Sym sym; int v; bool chg; };
+            const Part parts[] = { { Sym::BudLeft, e->r.left, e->r.leftChg },
+                                   { Sym::BudRight, e->r.right, e->r.rightChg },
+                                   { Sym::Case, e->r.box, e->r.boxChg } };
+            int colW = (rc.right - pad * 2) / 3;  // the full width, so "100%" with a bolt always fits
+            int rowTop = y + topH - Sc(6, dpi), rowH = Sc(20, dpi);
+            int is = Sc(15, dpi), bs = Sc(11, dpi);
+            COLORREF partCol = e->stale ? RGB(0x70, 0x70, 0x70) : RGB(0xC8, 0xC8, 0xC8);
+            SelectObject(dc, g_wf.tiny);
+            for (int i = 0; i < 3; i++) {
+                int cx = pad + colW * i;
+                HICON pi = WidgetSymbol(parts[i].sym, partCol, is);
+                if (pi) DrawIconEx(dc, cx, rowTop + (rowH - is) / 2, pi, is, is, 0, nullptr, DI_NORMAL);
+                std::wstring txt = PctText(parts[i].v);
+                SetTextColor(dc, partCol);
+                RECT t{ cx + is + Sc(4, dpi), rowTop, cx + colW, rowTop + rowH };
+                DrawTextW(dc, txt.c_str(), -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                if (parts[i].chg) {
+                    SIZE sz{};
+                    GetTextExtentPoint32W(dc, txt.c_str(), (int)txt.size(), &sz);
+                    HICON bi = WidgetSymbol(Sym::Bolt, chargeCol, bs);
+                    if (bi) DrawIconEx(dc, t.left + sz.cx + Sc(1, dpi), rowTop + (rowH - bs) / 2, bi, bs, bs, 0, nullptr, DI_NORMAL);
+                }
+            }
         }
-        y += rowH;
+        y += RowHeight(*e, dpi);
     }
     BitBlt(target, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldFont);
     SelectObject(dc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(dc);
@@ -682,7 +715,7 @@ void ShowMenu(HWND owner) {
     } else if (cmd >= IDM_ALERT_OFF && cmd <= IDM_ALERT_OFF + 100) {
         g_set.alertAt = (int)(cmd - IDM_ALERT_OFF);
         SetInt(L"AlertAt", g_set.alertAt);
-        for (auto& [k, e] : g_devs) e.alerted = false;
+        g_alerted.clear();
         RefreshIcons(true);
         CheckAlerts();
         if (g_widget) InvalidateRect(g_widget, nullptr, FALSE);
@@ -692,7 +725,7 @@ void ShowMenu(HWND owner) {
 // ---- readings -------------------------------------------------------------------------------------
 
 void ApplyReadings(std::vector<Reading>& readings) {
-    ULONGLONG now = GetTickCount64();
+    ULONGLONG now = AwakeMs();  // time the PC slept doesn't count as a device being gone
     std::set<std::wstring> seen;
     for (Reading& r : readings) {
         seen.insert(r.key);
@@ -823,7 +856,7 @@ LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_HOUSEKEEPING) {
                 // Age out quiet devices without waiting for the next poll result.
-                ULONGLONG now = GetTickCount64();
+                ULONGLONG now = AwakeMs();
                 bool changed = false;
                 for (auto& [k, e] : g_devs)
                     if (!e.stale && now - e.lastSeen > 100 * 1000) {
@@ -873,6 +906,7 @@ LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SETTINGCHANGE:
             if (lp && !wcscmp((const wchar_t*)lp, L"ImmersiveColorSet")) RefreshIcons(true);
             return 0;
+        case WM_DPICHANGED:
         case WM_DISPLAYCHANGE:
             RefreshIcons(true);
             if (g_widget) PlaceWidget(false);
@@ -922,8 +956,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         if (restarted) Sleep(200);
     }
     if (!mutex) {
+        // Only someone opening Juice by hand means "show the widget"; a startup launch must not.
+        bool background = restarted || (cmdLine && wcsstr(cmdLine, L"--autostart"));
         HWND other = FindWindowW(kMsgClass, nullptr);
-        if (other) PostMessageW(other, WM_APP_SHOW, 0, 0);
+        if (other && !background) PostMessageW(other, WM_APP_SHOW, 0, 0);
         return 0;
     }
 
@@ -983,7 +1019,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
-    StopPoller();
+    g_exiting = true;
+    if (!StopPoller()) {
+        // A device call is still blocked. Freeing shared state under it could crash, so leave now.
+        Log(L"Juice exited (poller still busy)");
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
     IconsShutdown();
     Log(L"Juice exited");
     if (mutex) {

@@ -230,7 +230,8 @@ bool EnsureWatcher() {
         return SUCCEEDED(hr);
     }
     INT32 st = 0;
-    if (SUCCEEDED(g_watcher->get_Status(&st)) && (st == 3 /*Stopped*/ || st == 4 /*Aborted*/)) {
+    // Created (0) means the first Start failed, e.g. Bluetooth was off when Juice started.
+    if (SUCCEEDED(g_watcher->get_Status(&st)) && (st == 0 /*Created*/ || st == 3 /*Stopped*/ || st == 4 /*Aborted*/)) {
         HRESULT hr = g_watcher->Start();
         Log(L"AirPods: BLE watcher restarted after status %d (hr=%08lx)", st, (unsigned long)hr);
         return SUCCEEDED(hr);
@@ -289,26 +290,42 @@ std::vector<Paired> PairedAirPods() {
     return out;
 }
 
+// Levels move slowly and in steps of 10, so a jump means a different pair.
+bool Differs(int a, int b) { return a >= 0 && b >= 0 && std::abs(a - b) > 10; }
+bool Conflicts(const Advert& a, const Advert& b) { return Differs(a.left, b.left) || Differs(a.right, b.right); }
+
+std::map<std::wstring, Advert> g_lastGood;  // by container: the last values shown for each pair
+
 // Best broadcast for one paired device; missing buds/case are filled from the other bud's broadcast.
-bool Pick(const Paired& dev, Advert& best) {
+// `sure` is false when another pair of the same model nearby could be the one we picked.
+bool Pick(const Paired& dev, Advert& best, bool* sure = nullptr) {
     ULONGLONG now = GetTickCount64();
     ULONGLONG maxAge = dev.connected ? 5 * 60 * 1000 : 90 * 1000;
     int minRssi = dev.connected ? -90 : -78;
     bool found = false;
+    auto lastIt = g_lastGood.find(dev.container);
+    auto matchesLast = [&](const Advert& a) { return lastIt != g_lastGood.end() && !Conflicts(a, lastIt->second); };
     std::lock_guard<std::mutex> lock(g_lock);
     for (auto& [addr, a] : g_adverts) {
         if (dev.pid && a.model != dev.pid) continue;
         ULONGLONG age = now - a.tick;
         if (age > maxAge || a.rssi < minRssi) continue;
         bool fresh = age < 90 * 1000, bestFresh = found && now - best.tick < 90 * 1000;
-        if (!found || (fresh && !bestFresh) || (fresh == bestFresh && (fresh ? a.rssi > best.rssi : a.tick > best.tick))) {
+        bool likeLast = matchesLast(a), bestLikeLast = found && matchesLast(best);
+        if (!found || (fresh && !bestFresh) || (fresh == bestFresh && likeLast && !bestLikeLast) ||
+            (fresh == bestFresh && likeLast == bestLikeLast && (fresh ? a.rssi > best.rssi : a.tick > best.tick))) {
             best = a;
             found = true;
         }
     }
-    if (found) {
+    if (!found) return false;
+    bool ambiguous = false;
+    for (auto& [addr, a] : g_adverts)
+        if (a.model == best.model && now - a.tick < 90 * 1000 && a.rssi >= best.rssi - 6 && Conflicts(a, best)) ambiguous = true;
+    if (!ambiguous) {
+        // Only a similar signal can be the other bud of the same pair.
         for (auto& [addr, a] : g_adverts) {
-            if (a.model != best.model) continue;
+            if (a.model != best.model || std::abs(a.rssi - best.rssi) > 10) continue;
             ULONGLONG d = best.tick > a.tick ? best.tick - a.tick : a.tick - best.tick;
             if (d > 15 * 1000) continue;
             if (best.left < 0 && a.left >= 0) { best.left = a.left; best.leftChg = a.leftChg; }
@@ -316,7 +333,16 @@ bool Pick(const Paired& dev, Advert& best) {
             if (best.box < 0 && a.box >= 0) { best.box = a.box; best.boxChg = a.boxChg; }
         }
     }
-    return found;
+    if (sure) *sure = dev.connected && !ambiguous && now - best.tick < 90 * 1000;
+    return true;
+}
+
+// Windows adds " - Find My" to the name of some AirPods.
+std::wstring CleanName(std::wstring n) {
+    size_t p = n.find(L" - Find My");
+    if (p != std::wstring::npos) n.resize(p);
+    while (!n.empty() && n.back() == L' ') n.pop_back();
+    return n;
 }
 
 }  // namespace
@@ -346,10 +372,14 @@ void PollAirPods(PollContext& ctx) {
     for (auto& d : devices) {
         if (d.pid && !d.connected && used[d.pid]) continue;
         Advert a;
-        if (!Pick(d, a)) continue;
+        bool sure = false;
+        if (!Pick(d, a, &sure)) continue;
         used[d.pid] = true;
+        if (sure) g_lastGood[d.container] = a;
         Reading s;
-        s.name = d.name.empty() ? L"AirPods" : d.name;
+        s.noAlert = !sure;
+        s.name = CleanName(d.name);
+        if (s.name.empty()) s.name = L"AirPods";
         s.key = L"airpods:" + Hex4(d.pid) + L":" + d.container;
         s.kind = Kind::Earbuds;
         s.via = L"Bluetooth LE";

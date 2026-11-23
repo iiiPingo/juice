@@ -181,9 +181,9 @@ void PollBluetooth(PollContext& ctx) {
 // ---------------------------------------------------------------------------------------------
 
 void PollSteelSeries(PollContext& ctx) {
-    std::set<USHORT> done;
+    std::set<std::wstring> done;
     for (const HidInfo& c : ctx.hid) {
-        if (c.vid != 0x1038 || done.count(c.pid)) continue;
+        if (c.vid != 0x1038 || done.count(c.physical)) continue;
         if (c.page != 0xFFC0 || !c.outLen || !c.inLen) continue;
         // Nova 7 / 7+ / Pro use other layouts; Anas has a Nova 5P, so the Nova 5 layout is used for
         // every other base station and checked for sanity (raw reply goes to the diagnostics).
@@ -206,12 +206,12 @@ void PollSteelSeries(PollContext& ctx) {
         }
         ctx.D(Fmt(L"  steelseries %04X page %04X: reply %ls", c.pid, c.page, got ? HexBytes(r).c_str() : L"(none)"));
         if (!got) continue;
-        done.insert(c.pid);
+        done.insert(c.physical);
         if (r[1] == 0x02) continue;  // headset switched off: base station only
         if (r[3] > 100) continue;
         Reading s;
-        s.key = L"steelseries:" + Hex4(c.pid);
-        s.name = L"Arctis Nova 5P";
+        s.key = L"steelseries:" + Hex4(c.pid) + ReceiverTag(ctx.hid, c);
+        s.name = c.pid == 0x2232 ? L"Arctis Nova 5P" : L"Arctis Nova";
         s.kind = Kind::Headset;
         s.via = L"2.4 GHz base station";
         s.percent = r[3];
@@ -236,40 +236,59 @@ struct XentaListener {
     int level = -1;      // confirmed level
     int candidate = -1;  // a level seen once (link-up starts with a false 100 %)
     bool charging = false;
-    ULONGLONG lastFrame = 0, lastLevel = 0;
+    ULONGLONG lastFrame = 0, lastLevel = 0, lastOpen = 0;  // AwakeMs(), so PC sleep doesn't count as silence
     BYTE model = 0;
     std::vector<std::wstring> history;
 };
 std::map<std::wstring, XentaListener> g_xenta;
+
+// One physical receiver, however many HID interfaces it exposes.
+std::wstring ClaimId(const HidInfo& c) { return Hex4(c.vid) + Hex4(c.pid) + L"|" + c.physical; }
 
 void PollXenta(PollContext& ctx, std::set<std::wstring>& claimed) {
     std::set<std::wstring> present;
     for (const HidInfo& c : ctx.hid) {
         if (c.vid != 0x1D57 || c.page != 0x000A || c.inLen < 5) continue;
         present.insert(c.path);
+        if (claimed.count(ClaimId(c))) continue;
         XentaListener& l = g_xenta[c.path];
-        bool fresh = !l.dev;
-        if (fresh) {
-            l.dev = std::make_unique<Hid>();
-            if (!l.dev->Open(c, false)) {
+        // A receiver that reconnects between polls keeps the same path but leaves our handle dead,
+        // so reopen it after a read error, or after 2 minutes without a single frame.
+        ULONGLONG awake = AwakeMs();
+        bool reopen = l.dev && (l.dev->Failed() || awake - std::max(l.lastFrame, l.lastOpen) > 120 * 1000);
+        bool fresh = false;
+        if (!l.dev || reopen) {
+            auto dev = std::make_unique<Hid>();
+            l.lastOpen = awake;
+            if (dev->Open(c, false)) {
+                if (reopen) {
+                    ctx.D(Fmt(L"  xenta %04X: reconnected", c.pid));
+                    l.candidate = -1;  // link-up can start with a false 100 %
+                }
+                l.dev = std::move(dev);
+                fresh = l.level < 0;
+            } else {
                 ctx.D(Fmt(L"  xenta %04X: open failed (%lu)", c.pid, GetLastError()));
-                g_xenta.erase(c.path);
-                continue;
+                l.dev.reset();
+                if (l.level < 0) {
+                    g_xenta.erase(c.path);
+                    continue;
+                }
             }
         }
         // Drain what queued up since the last poll; a new listener waits up to 6 s for frames.
         ULONGLONG until = GetTickCount64() + (fresh ? 6000 : 300);
         std::vector<BYTE> r;
         int frames = 0;
-        while (GetTickCount64() < until) {
+        while (l.dev && GetTickCount64() < until) {
             int wait = (int)std::min<ULONGLONG>(until - GetTickCount64(), fresh ? 2500 : 50);
             if (l.dev->Read(r, wait) < 0) {
-                if (!fresh || l.level >= 0) break;
+                if (l.dev->Failed() || !fresh || l.level >= 0) break;
                 continue;
             }
             if (r.size() < 5 || r[0] != 0x03 || (r[2] != 0x40 && r[2] != 0x41)) continue;
             frames++;
-            l.lastFrame = GetTickCount64();
+            l.lastFrame = AwakeMs();
             l.model = r[1];
             l.history.push_back(HexBytes(std::vector<BYTE>(r.begin(), r.begin() + std::min<size_t>(r.size(), 8))));
             if (l.history.size() > 8) l.history.erase(l.history.begin());
@@ -289,17 +308,19 @@ void PollXenta(PollContext& ctx, std::set<std::wstring>& claimed) {
                 }
                 l.candidate = lvl;
             }
-            if (fresh && l.level >= 0) break;
+            if (fresh && (l.level >= 0 || l.charging)) break;
         }
         ctx.D(Fmt(L"  xenta %04X model %02X: %d new frames, level %d%ls", c.pid, l.model, frames, l.level,
                   l.charging ? L" (charging)" : L""));
         for (auto& h : l.history) ctx.D(L"      " + h);
-        if (l.level < 0) continue;
-        ULONGLONG age = GetTickCount64() - l.lastFrame;
+        // On the cable the receiver reports no real level, so a mouse first seen while charging is
+        // listed as charging with an unknown level until it is unplugged.
+        if ((l.level < 0 && !l.charging) || !l.lastFrame) continue;
+        ULONGLONG age = AwakeMs() - l.lastFrame;
         if (age > 5 * 60 * 1000) continue;  // mouse off for a while
         Reading s;
-        s.key = L"mouse:xenta:" + Hex4(c.pid);
-        s.name = L"Attack Shark X1";
+        s.key = L"mouse:xenta:" + Hex4(c.pid) + ReceiverTag(ctx.hid, c);
+        s.name = (c.pid == 0xFA60 || c.pid == 0xFA55) ? L"Attack Shark X1" : L"Wireless mouse";
         s.kind = Kind::Mouse;
         s.via = (c.pid == 0xFA55 || c.pid == 0x2155) ? L"USB cable" : L"2.4 GHz receiver";
         s.percent = l.level;
@@ -307,7 +328,7 @@ void PollXenta(PollContext& ctx, std::set<std::wstring>& claimed) {
         s.asleep = age > 90 * 1000;
         s.graceSec = 30 * 60;
         ctx.out.push_back(s);
-        claimed.insert(Hex4(c.vid) + Hex4(c.pid));
+        claimed.insert(ClaimId(c));
     }
     for (auto it = g_xenta.begin(); it != g_xenta.end();) it = present.count(it->first) ? std::next(it) : g_xenta.erase(it);
 }
@@ -330,7 +351,7 @@ void PollRongyuan(PollContext& ctx, std::set<std::wstring>& claimed) {
     for (const HidInfo& c : ctx.hid) {
         UINT key = ((UINT)c.vid << 16) | c.pid;
         if (std::find(std::begin(kRongyuan), std::end(kRongyuan), key) == std::end(kRongyuan)) continue;
-        if (claimed.count(Hex4(c.vid) + Hex4(c.pid))) continue;
+        if (claimed.count(ClaimId(c))) continue;
         if (c.iface != 2 || c.page != 0xFFFF || c.usage != 0x0002 || c.featLen < 7) continue;
         Hid d;
         if (!d.OpenNoAccess(c)) continue;
@@ -346,11 +367,11 @@ void PollRongyuan(PollContext& ctx, std::set<std::wstring>& claimed) {
         }
         ctx.D(Fmt(L"  rongyuan %04X:%04X: %ls", c.vid, c.pid, ok ? HexBytes(r, 12).c_str() : L"(no reply)"));
         if (!ok) continue;
-        claimed.insert(Hex4(c.vid) + Hex4(c.pid));
+        claimed.insert(ClaimId(c));
         if (r[5] != 0 || r[3] < 1 || r[3] > 100) continue;  // no mouse in the slot / no level
         Reading s;
-        s.key = L"mouse:rongyuan:" + Hex4(c.vid) + Hex4(c.pid);
-        s.name = L"Attack Shark X1";
+        s.key = L"mouse:rongyuan:" + Hex4(c.vid) + Hex4(c.pid) + ReceiverTag(ctx.hid, c);
+        s.name = L"Wireless mouse";
         s.kind = Kind::Mouse;
         s.via = L"2.4 GHz receiver";
         s.percent = r[3];
@@ -395,7 +416,7 @@ void PollCompx(PollContext& ctx, std::set<std::wstring>& claimed) {
         return (a->page == 0xFF02 && a->usage == 2) > (b->page == 0xFF02 && b->usage == 2);
     });
     for (const HidInfo* c : colls) {
-        std::wstring id = Hex4(c->vid) + Hex4(c->pid);
+        std::wstring id = ClaimId(*c);
         if (claimed.count(id)) continue;
         Hid d;
         if (!d.Open(*c)) continue;
@@ -419,7 +440,7 @@ void PollCompx(PollContext& ctx, std::set<std::wstring>& claimed) {
         if (!answered) continue;
         claimed.insert(id);
         if (!haveLevel) continue;
-        s.key = L"mouse:compx:" + id;
+        s.key = L"mouse:compx:" + Hex4(c->vid) + Hex4(c->pid) + ReceiverTag(ctx.hid, *c);
         s.name = c->vid == 0x373B ? L"ATK mouse" : L"Wireless mouse";
         s.kind = Kind::Mouse;
         s.via = L"2.4 GHz receiver";
@@ -457,14 +478,14 @@ int BitmouseQuery(Hid& d, BYTE cmd) {
 void PollBitmouse(PollContext& ctx, std::set<std::wstring>& claimed) {
     for (const HidInfo& c : ctx.hid) {
         if (c.vid != 0x373B || c.pid != 0x1216 || c.page != 0xFF05 || c.usage != 1 || c.outLen < 64) continue;
-        if (claimed.count(Hex4(c.vid) + Hex4(c.pid))) continue;
+        if (claimed.count(ClaimId(c))) continue;
         Hid d;
         if (!d.Open(c)) continue;
         int level = BitmouseQuery(d, 0x07);
         ctx.D(Fmt(L"  atk nearlink: level %d", level));
         if (level < 1 || level > 100) continue;
         Reading s;
-        s.key = L"mouse:atknk";
+        s.key = L"mouse:atknk" + ReceiverTag(ctx.hid, c);
         s.name = L"ATK mouse";
         s.kind = Kind::Mouse;
         s.via = L"2.4 GHz receiver";
@@ -472,8 +493,7 @@ void PollBitmouse(PollContext& ctx, std::set<std::wstring>& claimed) {
         s.charging = BitmouseQuery(d, 0x0F) == 1;
         s.graceSec = 30 * 60;
         ctx.out.push_back(s);
-        claimed.insert(Hex4(c.vid) + Hex4(c.pid));
-        break;
+        claimed.insert(ClaimId(c));
     }
 }
 

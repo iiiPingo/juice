@@ -79,7 +79,11 @@ void PollWgi(PollContext& ctx) {
         IBatteryReport* report = nullptr;
         if (SUCCEEDED(raw->QueryInterface(__uuidof(IGameControllerBatteryInfo), (void**)&info)) && info &&
             SUCCEEDED(info->TryGetBatteryReport(&report)) && report) {
+#ifdef _MSC_VER
+            ABI::Windows::Foundation::IReference<int> *rem = nullptr, *full = nullptr;
+#else
             __FIReference_1_INT32 *rem = nullptr, *full = nullptr;
+#endif
             report->get_RemainingCapacityInMilliwattHours(&rem);
             report->get_FullChargeCapacityInMilliwattHours(&full);
             INT32 r = 0, f = 0;
@@ -108,6 +112,8 @@ void PollWgi(PollContext& ctx) {
         s.name = (vid == 0x3537 || name.empty() || name.find(L"Xbox") != std::wstring::npos) ? L"GameSir controller" : name;
         s.kind = Kind::Gamepad;
         s.via = L"Xbox mode";
+        for (const HidInfo& h : ctx.hid)  // this exact pad over Bluetooth: replaces Windows' generic reading
+            if (h.vid == vid && h.pid == pid && h.bluetooth) s.sameAs.push_back(h.container);
         s.percent = pct;
         s.charging = charging;
         s.graceSec = 120;

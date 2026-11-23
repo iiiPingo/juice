@@ -226,7 +226,8 @@ void PollLogitech(PollContext& ctx) {
             }
             if (pct < 0 || pct > 100) continue;
             Reading s;
-            s.key = L"logi:" + Hex4(c.pid) + L":" + std::to_wstring(idx);
+            s.key = L"logi:" + Hex4(c.pid) + ReceiverTag(ctx.hid, c) + L":" + std::to_wstring(idx);
+            if (c.bluetooth) s.sameAs.push_back(c.container);
             s.name = dev.name;
             s.kind = dev.kind;
             s.via = receiver ? L"Logitech receiver" : L"USB";
