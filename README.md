@@ -39,4 +39,4 @@ C++17, cross-compiled with MinGW-w64 on Linux: `sudo apt-get install g++-mingw-w
 `src/` has the app (tray icons, widget, pollers per device family), `res/` the icon, manifest and version.
 
 ## License
-MIT
+PolyForm Noncommercial License 1.0.0: free to use, copy and change for non-commercial purposes, not for selling or other commercial use. See `LICENSE`.
