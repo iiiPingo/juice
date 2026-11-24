@@ -7,15 +7,17 @@ Battery levels of wireless devices as ring icons in the Windows tray, with a fly
 - `res/juice.rc` holds the version resource (VERSIONINFO), icon and manifest. Bump the version there every release. Minibar compares it with the GitHub tag; without a version resource Minibar shows "No version number" and offers no update.
 - Release zip: `Juice-x.y.z.zip` with `Juice/Juice.exe` and `README.txt`.
 - There is no Windows runtime in the Linux workspace (Wine doesn't start), so hardware behaviour can't be tested here.
+- On Windows, `build.cmd` builds `out\Juice.exe` with Visual Studio (static runtime).
 
 ## Layout
-- `src/main.cpp` tray, flyout, widget. `src/devices.cpp` and `src/poller.cpp` device list and polling. `src/vendors.cpp` Logitech HID++ 2.0 (Unifying/Bolt/Lightspeed receivers), `src/airpods.cpp`, `src/gamepad.cpp`, `src/hid.cpp` other families. `src/icons.cpp` ring icons.
+- `src/main.cpp` tray, flyout, widget. `src/devices.cpp` and `src/poller.cpp` device list and polling. `src/vendors.cpp` Logitech HID++ 2.0 (Unifying/Bolt/Lightspeed receivers), `src/airpods.cpp`, `src/gamepad.cpp` (GameSir: Xbox mode through Windows.Gaming.Input, Nova receivers through vendor page FF7A), `src/hid.cpp` other families. `src/icons.cpp` ring icons.
 - Bluetooth batteries come from the Windows device property, so any Bluetooth device that shows a battery in Windows Settings works.
 
 ## Gotchas
 - Only add a poller for a device family if the protocol is known to work. Razer was skipped because its battery command may need Razer's driver. Prefer reporting over guessing.
 - `Juice.exe --exit` closes it cleanly (message `WM_APP + 4` to the message window). It must never start Juice. Minibar's Stop and updates rely on it.
 - Settings and the log (`settings.ini`, `juice.log`) live next to the exe or in `%APPDATA%\Juice`. Never touch them.
+- Every device has a key (for example `pad:gamesir`). Custom names (`[Names]`) and hidden devices (`[Hidden]`) are saved in `settings.ini` under that key, so a key must stay the same whichever readings are present. `MergeGameSir` folds the several readings one GameSir receiver shows in Windows into one entry.
 - The supported-devices note belongs in Minibar's card, not in Juice's widget.
 
 ## Releasing
