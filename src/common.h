@@ -127,3 +127,16 @@ void RequestPoll();
 void RequestDiagnostics();                // posts msg with wParam=1 and a heap std::wstring* in lParam
 ULONGLONG PollerHeartbeat();
 bool StopPoller();                        // false if the thread is still running after the wait
+
+// ---- status.cpp (status.txt for Minibar's side menu) ----
+struct StatusDev {
+    std::wstring name;
+    Kind kind = Kind::Other;
+    int percent = -1;
+    bool charging = false;
+};
+const wchar_t* KindWord(Kind k);
+std::string StatusText(const std::vector<StatusDev>& devs, const std::wstring& updated);  // UTF-8
+std::wstring StatusPath();
+bool WriteStatus(const std::vector<StatusDev>& devs);
+void ClearStatus();

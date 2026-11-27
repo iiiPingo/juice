@@ -3,6 +3,9 @@
 <p align="center">Battery levels of your wireless devices, right in the Windows tray.</p>
 <p align="center"><a href="../../releases/latest"><b>Download the latest release</b></a></p>
 
+## New in 1.4.0
+- Minibar 1.9.0 can show your battery levels in its side menu. Juice keeps a small `status.txt` in its data folder for it (rewritten on every reading, removed when Juice closes).
+
 ## New in 1.3.0
 - Show device names in the widget with a new setting (tray menu, Show device names).
 - Rename any device or hide it from the tray and widget (tray menu, Devices). Your choices are saved.
@@ -31,7 +34,7 @@ Xbox (Bluetooth) and GameSir controllers. Not yet: Razer, Corsair, HyperX receiv
 Tested with Sony WH-1000XM5 headphones and an Attack Shark X1 mouse.
 
 ## Install
-1. Download `Juice-1.3.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
+1. Download `Juice-1.4.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
 2. Run `Juice.exe`. If SmartScreen warns, click **More info > Run anyway** (the exe is unsigned).
 
 ## Build

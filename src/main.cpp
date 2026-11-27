@@ -884,12 +884,15 @@ std::wstring MenuText(std::wstring s) {
     return s;
 }
 
+void SaveStatus();  // below, beside ApplyReadings
+
 void DevicesChanged() {
     RefreshIcons(false);
     if (g_widget) {
         if (IsWindowVisible(g_widget)) PlaceWidget(false);
         InvalidateRect(g_widget, nullptr, FALSE);
     }
+    SaveStatus();
 }
 
 void HandleDeviceCommand(const KnownDevice& d, int action) {
@@ -1012,6 +1015,17 @@ void ShowMenu(HWND owner) {
 
 // ---- readings -------------------------------------------------------------------------------------
 
+// status.txt for Minibar: the devices shown in the tray (hidden ones left out), with their shown names.
+void SaveStatus() {
+    std::vector<StatusDev> v;
+    for (Entry* e : Ordered()) v.push_back({ DisplayName(*e), e->r.kind, e->r.percent, e->r.charging });
+    if (!WriteStatus(v)) {
+        static bool logged = false;
+        if (!logged) Log(L"couldn't write %ls", StatusPath().c_str());
+        logged = true;
+    }
+}
+
 void ApplyReadings(std::vector<Reading>& readings) {
     ULONGLONG now = AwakeMs();  // time the PC slept doesn't count as a device being gone
     std::set<std::wstring> seen;
@@ -1046,6 +1060,7 @@ void ApplyReadings(std::vector<Reading>& readings) {
     RefreshIcons(false);
     CheckAlerts();
     if (g_widget && IsWindowVisible(g_widget)) PlaceWidget(false);
+    SaveStatus();
 }
 
 void WriteDiagnostics(const std::wstring& text) {
@@ -1208,6 +1223,7 @@ LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (auto& [k, e] : g_devs)
                 if (e.iconAdded) DeleteIcon(e.iconId);
             if (g_placeholder) DeleteIcon(kPlaceholderIcon);
+            ClearStatus();   // Minibar hides its Devices block once Juice is gone
             PostQuitMessage(0);
             return 0;
     }
