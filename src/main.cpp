@@ -48,6 +48,9 @@ enum : UINT {
     IDM_STYLE_SYMBOL,
     IDM_STYLE_NUMBER,
     IDM_NAMES,
+    IDM_THEME_DARK,   // + ThemeMode: dark, oled, light
+    IDM_THEME_OLED,
+    IDM_THEME_LIGHT,
     IDM_ALERT_OFF = 200,  // 200 + percent
     IDM_DEVICE = 1000,    // 1000 + 3 x device: hide / show, rename, original name
 };
@@ -67,6 +70,7 @@ struct Settings {
     bool autostart = true;
     int iconStyle = 0;  // 0 = device symbol + ring, 1 = number
     bool showNames = false;  // device names in the widget
+    ThemeMode theme = ThemeMode::Dark;  // Theme=dark | oled | light
     void Load() {
         // Hand-edited or damaged values fall back to the default instead of changing behaviour.
         wchar_t raw[32] = {};
@@ -83,6 +87,9 @@ struct Settings {
         autostart = GetInt(L"Autostart", 1) != 0;
         showNames = GetInt(L"WidgetNames", 0) != 0;
         iconStyle = GetInt(L"IconStyle", 0) == 1 ? 1 : 0;
+        wchar_t th[16] = {};
+        GetPrivateProfileStringW(kAppName, L"Theme", L"dark", th, 16, IniPath().c_str());
+        theme = ParseTheme(th);
     }
 } g_set;
 
@@ -607,27 +614,28 @@ void PaintWidget(HWND hwnd, HDC target) {
     HBITMAP bmp = CreateCompatibleBitmap(target, rc.right, rc.bottom);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
     HGDIOBJ oldFont = GetCurrentObject(dc, OBJ_FONT);
-    HBRUSH bg = CreateSolidBrush(RGB(0x20, 0x20, 0x20));
+    const Palette& pal = PaletteFor(g_set.theme);
+    HBRUSH bg = CreateSolidBrush(pal.bg);
     FillRect(dc, &rc, bg);
     DeleteObject(bg);
     SetBkMode(dc, TRANSPARENT);
 
     int pad = Sc(14, dpi);
     int y = Sc(6, dpi);
-    const COLORREF chargeCol = ToneColor(Tone::Charging, false);
+    const COLORREF chargeCol = ToneColor(Tone::Charging, pal.light);
     auto list = Ordered();
     if (list.empty()) {
         SelectObject(dc, g_wf.name);
-        SetTextColor(dc, RGB(0xA0, 0xA0, 0xA0));
+        SetTextColor(dc, pal.sub);
         RECT t{ pad, y, rc.right - pad, y + Sc(42, dpi) };
         DrawTextW(dc, g_devs.empty() ? L"Looking for your devices..." : L"All devices are hidden", -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     for (Entry* e : list) {
         const int topH = Sc(42, dpi);
         Tone tone = ToneFor(*e);
-        COLORREF accent = ToneColor(tone, false);
+        COLORREF accent = ToneColor(tone, pal.light);
         int gs = Sc(26, dpi);
-        HICON gi = WidgetGlyph(e->r.kind, e->stale ? RGB(0x70, 0x70, 0x70) : RGB(0xF2, 0xF2, 0xF2), gs);
+        HICON gi = WidgetGlyph(e->r.kind, e->stale ? pal.glyphStale : pal.glyph, gs);
         if (gi) DrawIconEx(dc, pad, y + (topH - gs) / 2, gi, gs, gs, 0, nullptr, DI_NORMAL);
         int x0 = pad + gs + Sc(12, dpi);
 
@@ -636,14 +644,14 @@ void PaintWidget(HWND hwnd, HDC target) {
         RECT p{ rc.right - pad - pctW, y, rc.right - pad, y + topH };
         std::wstring pct = PctText(e->r.percent);
         SelectObject(dc, g_wf.pct);
-        SetTextColor(dc, tone == Tone::Normal ? RGB(0xFF, 0xFF, 0xFF) : accent);
+        SetTextColor(dc, tone == Tone::Normal ? pal.pct : accent);
         DrawTextW(dc, pct.c_str(), -1, &p, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         // Status: a bolt while charging, a moon while asleep.
         int barRight = p.left - Sc(8, dpi);
         int ss = Sc(14, dpi);
         if (e->stale || e->r.charging) {
-            HICON si = e->stale ? WidgetSymbol(Sym::Moon, RGB(0x8C, 0x8C, 0x8C), ss) : WidgetSymbol(Sym::Bolt, chargeCol, ss);
+            HICON si = e->stale ? WidgetSymbol(Sym::Moon, pal.moon, ss) : WidgetSymbol(Sym::Bolt, chargeCol, ss);
             if (si) DrawIconEx(dc, barRight - ss, y + (topH - ss) / 2, si, ss, ss, 0, nullptr, DI_NORMAL);
             barRight -= ss + Sc(6, dpi);
         }
@@ -653,16 +661,16 @@ void PaintWidget(HWND hwnd, HDC target) {
         if (g_set.showNames) {
             std::wstring label = DisplayName(*e);
             SelectObject(dc, g_wf.name);
-            SetTextColor(dc, e->stale ? RGB(0x90, 0x90, 0x90) : RGB(0xF0, 0xF0, 0xF0));
+            SetTextColor(dc, e->stale ? pal.nameStale : pal.name);
             RECT n{ x0, y + Sc(5, dpi), barRight, y + Sc(25, dpi) };
             DrawTextW(dc, label.c_str(), -1, &n, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
         RECT track{ x0, barY, barRight, barY + barH };
-        FillPill(dc, track, RGB(0x3A, 0x3A, 0x3A));
+        FillPill(dc, track, pal.track);
         if (e->r.percent > 0) {
             RECT fill = track;
             fill.right = track.left + std::max<int>(barH, (track.right - track.left) * std::min(e->r.percent, 100) / 100);
-            FillPill(dc, fill, e->stale ? RGB(0x6A, 0x6A, 0x6A) : tone == Tone::Normal ? RGB(0xD8, 0xD8, 0xD8) : accent);
+            FillPill(dc, fill, e->stale ? pal.fillStale : tone == Tone::Normal ? pal.fill : accent);
         }
 
         // Earbuds: left bud, right bud, case
@@ -674,7 +682,7 @@ void PaintWidget(HWND hwnd, HDC target) {
             int colW = (rc.right - pad * 2) / 3;  // the full width, so "100%" with a bolt always fits
             int rowTop = y + topH - Sc(6, dpi), rowH = Sc(20, dpi);
             int is = Sc(15, dpi), bs = Sc(11, dpi);
-            COLORREF partCol = e->stale ? RGB(0x70, 0x70, 0x70) : RGB(0xC8, 0xC8, 0xC8);
+            COLORREF partCol = e->stale ? pal.partStale : pal.part;
             SelectObject(dc, g_wf.tiny);
             for (int i = 0; i < 3; i++) {
                 int cx = pad + colW * i;
@@ -745,6 +753,30 @@ void ShowWidget(bool show) {
     }
 }
 
+// Windows 11 title bar and outline for the current theme (like Minibar): dark or light caption,
+// black caption with a #1F1F24 outline on OLED, #E0E0E0 outline on Light, Windows' own border on Dark.
+void ApplyTitleBar(HWND wnd) {
+    if (!wnd) return;
+    const Palette& pal = PaletteFor(g_set.theme);
+    BOOL dark = pal.light ? FALSE : TRUE;
+    DwmSetWindowAttribute(wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    if (pal.mode != ThemeMode::Dark) {
+        COLORREF cap = pal.bg;
+        DwmSetWindowAttribute(wnd, 35 /* DWMWA_CAPTION_COLOR */, &cap, sizeof(cap));
+    }
+    COLORREF border = pal.border == CLR_INVALID ? 0xFFFFFFFF /* DWMWA_COLOR_DEFAULT */ : pal.border;
+    DwmSetWindowAttribute(wnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
+}
+
+// The widget's outline follows the theme; then it repaints.
+void ApplyWidgetTheme() {
+    if (!g_widget) return;
+    const Palette& pal = PaletteFor(g_set.theme);
+    COLORREF border = pal.border == CLR_INVALID ? 0xFFFFFFFF /* DWMWA_COLOR_DEFAULT */ : pal.border;
+    DwmSetWindowAttribute(g_widget, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
+    InvalidateRect(g_widget, nullptr, FALSE);
+}
+
 // ---- rename box -----------------------------------------------------------------------------------
 
 struct RenameBox {
@@ -771,14 +803,20 @@ LRESULT CALLBACK RenameProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE:
             if (box) box->done = true;
             return 0;
+        case WM_ERASEBKGND: {   // the class brush is fixed at first use, so paint the current theme's background here
+            RECT r;
+            GetClientRect(hwnd, &r);
+            if (box && box->bg) FillRect((HDC)wp, &r, box->bg);
+            return 1;
+        }
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
-            SetTextColor((HDC)wp, RGB(0xF2, 0xF2, 0xF2));
-            SetBkColor((HDC)wp, RGB(0x20, 0x20, 0x20));
+            SetTextColor((HDC)wp, PaletteFor(g_set.theme).text);
+            SetBkColor((HDC)wp, PaletteFor(g_set.theme).bg);
             return box ? (LRESULT)box->bg : 0;
         case WM_CTLCOLOREDIT:
-            SetTextColor((HDC)wp, RGB(0xF2, 0xF2, 0xF2));
-            SetBkColor((HDC)wp, RGB(0x2D, 0x2D, 0x2D));
+            SetTextColor((HDC)wp, PaletteFor(g_set.theme).text);
+            SetBkColor((HDC)wp, PaletteFor(g_set.theme).field);
             return box ? (LRESULT)box->field : 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -816,11 +854,10 @@ bool AskName(const std::wstring& current, std::wstring& result) {
     int x = (mi.rcWork.left + mi.rcWork.right - w) / 2, y = (mi.rcWork.top + mi.rcWork.bottom - h) / 2;
     HWND wnd = CreateWindowExW(WS_EX_TOPMOST, L"JuiceRename", L"Rename device", style, x, y, w, h, nullptr, nullptr, g_inst, nullptr);
     if (!wnd) return false;
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    ApplyTitleBar(wnd);
     RenameBox box;
-    box.bg = CreateSolidBrush(RGB(0x20, 0x20, 0x20));
-    box.field = CreateSolidBrush(RGB(0x2D, 0x2D, 0x2D));
+    box.bg = CreateSolidBrush(PaletteFor(g_set.theme).bg);
+    box.field = CreateSolidBrush(PaletteFor(g_set.theme).field);
     SetWindowLongPtrW(wnd, GWLP_USERDATA, (LONG_PTR)&box);
     HFONT font = CreateFontW(-Sc(14, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
                              CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
@@ -942,9 +979,14 @@ void ShowMenu(HWND owner) {
     HMENU style = CreatePopupMenu();
     AppendMenuW(style, MF_STRING | (g_set.iconStyle == 0 ? MF_CHECKED : 0), IDM_STYLE_SYMBOL, L"Device symbol + ring");
     AppendMenuW(style, MF_STRING | (g_set.iconStyle == 1 ? MF_CHECKED : 0), IDM_STYLE_NUMBER, L"Number");
+    HMENU theme = CreatePopupMenu();
+    const wchar_t* themeLabels[] = { L"Dark", L"OLED", L"Light" };
+    for (int i = 0; i < 3; i++)
+        AppendMenuW(theme, MF_STRING | ((int)g_set.theme == i ? MF_CHECKED : 0), IDM_THEME_DARK + i, themeLabels[i]);
     AppendMenuW(m, MF_STRING | (g_set.widget ? MF_CHECKED : 0), IDM_WIDGET, L"Show widget");
     AppendMenuW(m, MF_STRING | (g_set.onTop ? MF_CHECKED : 0), IDM_ONTOP, L"Keep widget on top");
     AppendMenuW(m, MF_STRING | (g_set.showNames ? MF_CHECKED : 0), IDM_NAMES, L"Show device names");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)theme, L"Widget theme");
     auto known = KnownDevices();
     HMENU devices = CreatePopupMenu();
     for (size_t i = 0; i < known.size(); i++) {
@@ -986,6 +1028,10 @@ void ShowMenu(HWND owner) {
         g_set.showNames = !g_set.showNames;
         SetInt(L"WidgetNames", g_set.showNames);
         DevicesChanged();
+    } else if (cmd >= IDM_THEME_DARK && cmd <= IDM_THEME_LIGHT) {
+        g_set.theme = (ThemeMode)(cmd - IDM_THEME_DARK);
+        WritePrivateProfileStringW(kAppName, L"Theme", ThemeName(g_set.theme), IniPath().c_str());
+        ApplyWidgetTheme();
     } else if (cmd >= IDM_DEVICE && (cmd - IDM_DEVICE) / 3 < known.size()) {
         HandleDeviceCommand(known[(cmd - IDM_DEVICE) / 3], (int)((cmd - IDM_DEVICE) % 3));
     } else if (cmd == IDM_AUTOSTART) {
@@ -1305,6 +1351,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         SetLayeredWindowAttributes(g_widget, 0, 242, LWA_ALPHA);
         DWORD corner = 2;  // DWMWCP_ROUND (Windows 11)
         DwmSetWindowAttribute(g_widget, 33, &corner, sizeof(corner));
+        ApplyWidgetTheme();
         PlaceWidget(true, true);
         if (g_set.widget) ShowWindow(g_widget, SW_SHOWNOACTIVATE);
     }

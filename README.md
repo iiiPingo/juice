@@ -3,6 +3,9 @@
 <p align="center">Battery levels of your wireless devices, right in the Windows tray.</p>
 <p align="center"><a href="../../releases/latest"><b>Download the latest release</b></a></p>
 
+## New in 1.5.0
+- Widget theme in the tray menu: Dark (default, unchanged), OLED (pure black) or Light (Windows 11 light), the same three as Minibar. It switches right away and is saved as `Theme=` in `settings.ini`.
+
 ## New in 1.4.0
 - Minibar 1.9.0 can show your battery levels in its side menu. Juice keeps a small `status.txt` in its data folder for it (rewritten on every reading, removed when Juice closes).
 
@@ -34,7 +37,7 @@ Xbox (Bluetooth) and GameSir controllers. Not yet: Razer, Corsair, HyperX receiv
 Tested with Sony WH-1000XM5 headphones and an Attack Shark X1 mouse.
 
 ## Install
-1. Download `Juice-1.4.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
+1. Download `Juice-1.5.0.zip` from [Releases](../../releases/latest) and unzip it into its own folder.
 2. Run `Juice.exe`. If SmartScreen warns, click **More info > Run anyway** (the exe is unsigned).
 
 ## Build

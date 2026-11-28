@@ -128,6 +128,24 @@ void RequestDiagnostics();                // posts msg with wParam=1 and a heap 
 ULONGLONG PollerHeartbeat();
 bool StopPoller();                        // false if the thread is still running after the wait
 
+// ---- theme.cpp (widget and rename box: Dark, OLED, Light) ----
+enum class ThemeMode { Dark, Oled, Light };
+struct Palette {
+    ThemeMode mode;
+    bool light;                       // dark text on a light background (also picks the light tone colours)
+    COLORREF bg, field, border;       // border CLR_INVALID = Windows' own
+    COLORREF text, sub;
+    COLORREF glyph, glyphStale;
+    COLORREF pct;
+    COLORREF name, nameStale;
+    COLORREF track, fill, fillStale;
+    COLORREF part, partStale;
+    COLORREF moon;
+};
+ThemeMode ParseTheme(const wchar_t* s);   // "dark" / "oled" / "light", anything else = Dark
+const wchar_t* ThemeName(ThemeMode m);
+const Palette& PaletteFor(ThemeMode m);
+
 // ---- status.cpp (status.txt for Minibar's side menu) ----
 struct StatusDev {
     std::wstring name;
